@@ -1,0 +1,20 @@
+/* The entrance is intentionally a silent, centered visual moment. */
+.door-stage {
+  left: 50% !important;
+  right: auto !important;
+  transform: translateX(-50%) !important;
+}
+
+.open-button {
+  left: 50% !important;
+  bottom: 8% !important;
+  transform: translateX(-50%) !important;
+}
+
+.opening .open-button { transform: translate(-50%, 15px) !important; }
+
+@media (max-width: 720px) {
+  .door-hero { padding: 0; }
+  .door-stage { left: 50% !important; right: auto !important; width: 70vw; height: 67vh; bottom: 3%; }
+  .open-button { left: 50% !important; bottom: 7% !important; transform: translateX(-50%) !important; }
+}
