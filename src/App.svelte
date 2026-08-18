@@ -81,6 +81,13 @@
   let adminCharacterSaving = false;
   let adminInventory = [];
   let adminCards = [];
+  let itemCatalog = [];
+  let itemCatalogLoading = false;
+  let itemCatalogError = '';
+  let itemForm = { id: null, name: '', effect: '', grade: '일반', item_type: '기타', icon_url: '' };
+  let itemSaving = false;
+  let itemSearch = '';
+  let inventorySearch = '';
   let adminDetailLoading = false;
   let characterRequestId = 0;
   let accountSaving = false;
@@ -125,11 +132,14 @@
   $: isEditPage = currentRoute.startsWith('edit/');
   $: isMyPage = currentRoute === 'mypage';
   $: isAdminPage = currentRoute === 'admin';
+  $: isAdminItemsPage = currentRoute === 'admin-items';
   $: isAdminMypage = currentRoute === 'admin-mypage';
   $: isAdminCharacterPage = currentRoute.startsWith('admin-character/');
   $: currentBoard = categories.find((board) => board.slug === currentRoute.replace('board/', '')) || categories[0];
   $: writeBoard = categories.find((board) => board.slug === writeBoardSlug) || categories.find((board) => board.slug === 'users') || categories[0];
   $: sessionPlayerFilterOptions = buildSessionPlayerFilterOptions(posts, adminCharacters);
+  $: filteredItemCatalog = filterItemCatalog(itemCatalog, itemSearch);
+  $: inventorySearchResults = inventorySearch.trim() ? filterItemCatalog(itemCatalog, inventorySearch).slice(0, 8) : [];
   $: boardPagePosts = posts
     .filter((post) => currentBoard.slug === 'all' || post.category === currentBoard.name)
     .filter((post) => `${post.title} ${post.excerpt} ${post.author}`.toLowerCase().includes(searchTerm.toLowerCase().trim()))
@@ -329,6 +339,7 @@
       if (isAdmin) {
         adminProfileForm = { ...adminProfileForm, nickname: data?.nickname || '' };
         adminProfileImagePreview = data?.avatar_url || '';
+        if (currentRoute === 'admin-items' || currentRoute.startsWith('admin-character/')) loadItemCatalog();
         if (currentRoute === 'mypage') navigateTo('#admin-mypage');
       }
     } catch (error) {
@@ -431,6 +442,7 @@
     }
     currentRoute = nextRoute; activeCategory = '전체'; searchTerm = ''; sortBy = 'latest'; noticeTypeFilter = 'all'; sessionPlayerFilter = ''; currentPage = 1; detailPost = null; detailHtml = '';
     if (nextRoute === 'admin') { adminSelectedCharacter = null; adminInventory = []; adminCards = []; }
+    if (nextRoute === 'admin-items') { resetItemForm(); itemSearch = ''; }
     if (nextRoute.startsWith('write/')) { writeBoardSlug = nextRoute.replace('write/', '') || 'users'; editingPostId = null; editLoading = false; }
     if (!nextRoute.startsWith('edit/')) editLoading = false;
     if (nextRoute.startsWith('edit/')) {
@@ -444,6 +456,7 @@
     if (nextRoute.startsWith('post/')) loadPostDetail(nextRoute.replace('post/', ''));
     if (nextRoute.startsWith('admin-character/')) loadAdminCharacterDetail(nextRoute.replace('admin-character/', ''));
     if (nextRoute === 'mypage' || nextRoute === 'admin' || nextRoute === 'admin-mypage') loadCharacterData();
+    if (nextRoute === 'admin-items' || nextRoute.startsWith('admin-character/')) loadItemCatalog();
   }
 
   function navigateTo(hash) {
@@ -1133,12 +1146,76 @@
 
   function numberOrNull(value) { return value === '' || value === null || value === undefined ? null : Number(value); }
   function selectInventoryItem(item) { selectedInventoryItem = item; }
+
+  function filterItemCatalog(catalog = [], keyword = '') {
+    const term = keyword.trim().toLowerCase();
+    if (!term) return catalog;
+    return catalog.filter((item) => `${item.name} ${item.effect} ${item.grade} ${item.item_type}`.toLowerCase().includes(term));
+  }
+
+  async function loadItemCatalog() {
+    if (!supabase) return;
+    itemCatalogLoading = true;
+    itemCatalogError = '';
+    const { data, error } = await supabase.from('items').select('id, name, effect, grade, item_type, icon_url').order('name');
+    itemCatalogLoading = false;
+    if (error) { itemCatalogError = error.message; return; }
+    itemCatalog = data || [];
+  }
+
+  function resetItemForm() { itemForm = { id: null, name: '', effect: '', grade: '일반', item_type: '기타', icon_url: '' }; }
+  function editItem(item) { itemForm = { id: item.id, name: item.name, effect: item.effect || '', grade: item.grade, item_type: item.item_type, icon_url: item.icon_url || '' }; }
+
+  async function handleItemIconChange(event) {
+    const file = event.currentTarget.files?.[0] || null;
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) return showNotice('PNG, JPG, WEBP 이미지만 업로드할 수 있어요.');
+    if (file.size > 5 * 1024 * 1024) return showNotice('이미지는 5MB 이하로 업로드해 주세요.');
+    try { itemForm = { ...itemForm, icon_url: await imageFileToDataUrl(file) }; }
+    catch (error) { showNotice(error instanceof Error ? error.message : '아이템 이미지를 처리하지 못했습니다.'); }
+  }
+
+  async function saveItem() {
+    if (!isAdmin || !supabase) return;
+    if (!itemForm.name.trim()) return showNotice('아이템 이름을 입력해 주세요.');
+    itemSaving = true;
+    const payload = { name: itemForm.name.trim(), effect: itemForm.effect.trim(), grade: itemForm.grade, item_type: itemForm.item_type, icon_url: itemForm.icon_url || null };
+    const result = itemForm.id
+      ? await supabase.from('items').update(payload).eq('id', itemForm.id)
+      : await supabase.from('items').insert(payload);
+    itemSaving = false;
+    if (result.error) return showNotice(`아이템 저장 실패: ${result.error.message}`);
+    showNotice(itemForm.id ? '아이템을 수정했습니다.' : '아이템을 등록했습니다.');
+    resetItemForm();
+    await loadItemCatalog();
+  }
+
+  async function deleteItem(item) {
+    if (!isAdmin || !supabase || !confirm(`'${item.name}' 아이템을 삭제할까요?`)) return;
+    const { error } = await supabase.from('items').delete().eq('id', item.id);
+    if (error) return showNotice(`아이템 삭제 실패: ${error.message}`);
+    if (itemForm.id === item.id) resetItemForm();
+    await loadItemCatalog();
+    showNotice('아이템을 삭제했습니다.');
+  }
+
+  function addCatalogItemToInventory(item) {
+    const existingIndex = adminInventory.findIndex((entry) => entry.item_id === item.id);
+    if (existingIndex >= 0) {
+      adminInventory = adminInventory.map((entry, index) => index === existingIndex ? { ...entry, quantity: Math.max(1, Number(entry.quantity) || 1) + 1 } : entry);
+    } else {
+      adminInventory = [...adminInventory, { item_id: item.id, item_name: item.name, item_effect: item.effect || '', quantity: 1, grade: item.grade, item_type: item.item_type, icon_url: item.icon_url || '' }];
+    }
+    inventorySearch = '';
+    showNotice(`'${item.name}'을(를) 인벤토리에 담았습니다. 저장해야 반영됩니다.`);
+  }
   function getInventoryIcon(item) {
     if (item?.icon_url) return item.icon_url;
     if (item?.item_type === '소비' || /물약|포션|bottle|potion/i.test(item?.item_name || '')) return '/icons/round-potion.png';
     return { 유물: '✦', 장비: '⚔', 소비: '✚', 기타: '◆' }[item?.item_type] || '◆';
   }
   function isImageIcon(value) { return typeof value === 'string' && /^(\/|data:image\/|https?:\/\/)/.test(value); }
+  function catalogItemIcon(item) { return getInventoryIcon({ ...item, item_name: item?.name || '' }); }
 
   async function handleAdminInventoryImage(event, index) {
     const file = event.currentTarget.files?.[0] || null;
@@ -1200,7 +1277,7 @@
     const deleteItems = await supabase.from('inventory_items').delete().eq('character_id', characterId);
     const deleteCards = await supabase.from('character_cards').delete().eq('character_id', characterId);
     if (deleteItems.error || deleteCards.error) { adminCharacterSaving = false; return showNotice('인벤토리 또는 카드 정리 중 오류가 발생했습니다.'); }
-    const items = adminInventory.filter((item) => item.item_name?.trim()).map((item) => ({ character_id: characterId, item_name: item.item_name.trim(), item_effect: item.item_effect?.trim() || '', quantity: Math.max(1, Number(item.quantity) || 1), grade: item.grade, item_type: item.item_type, icon_url: item.icon_url || null }));
+    const items = adminInventory.filter((item) => item.item_name?.trim()).map((item) => ({ character_id: characterId, item_id: item.item_id || null, item_name: item.item_name.trim(), item_effect: item.item_effect?.trim() || '', quantity: Math.max(1, Number(item.quantity) || 1), grade: item.grade, item_type: item.item_type, icon_url: item.icon_url || null }));
     const cards = adminCards.filter((card) => card.card_name?.trim()).map((card) => ({ character_id: characterId, card_name: card.card_name.trim(), card_effect: card.card_effect?.trim() || '', quantity: Math.max(1, Number(card.quantity) || 1), energy: Math.max(0, Number(card.energy) || 0), grade: card.grade }));
     const itemSaveError = await saveInventoryWithIconFallback(items);
     if (itemSaveError) { adminCharacterSaving = false; return showNotice(`인벤토리 저장 실패: ${itemSaveError.message}`); }
@@ -1223,16 +1300,20 @@
     showNotice('캐릭터를 삭제했습니다.');
   }
 
-  function newAdminInventoryItem() { adminInventory = [...adminInventory, { item_name: '', item_effect: '', quantity: 1, grade: '일반', item_type: '기타', icon_url: '' }]; }
+  function newAdminInventoryItem() { adminInventory = [...adminInventory, { item_id: null, item_name: '', item_effect: '', quantity: 1, grade: '일반', item_type: '기타', icon_url: '' }]; }
   function removeAdminInventory(index) { adminInventory = adminInventory.filter((_, itemIndex) => itemIndex !== index); }
   function newAdminCard() { adminCards = [...adminCards, { card_name: '', card_effect: '', quantity: 1, energy: 0, grade: '기본' }]; }
   function removeAdminCard(index) { adminCards = adminCards.filter((_, cardIndex) => cardIndex !== index); }
 
   async function loadCharacterCollections(characterId) {
-    let itemsResult = await supabase.from('inventory_items').select('id, item_name, item_effect, quantity, grade, item_type, icon_url').eq('character_id', characterId).order('created_at');
+    let itemsResult = await supabase.from('inventory_items').select('id, item_id, item_name, item_effect, quantity, grade, item_type, icon_url').eq('character_id', characterId).order('created_at');
+    if (itemsResult.error) {
+      const withoutItemId = await supabase.from('inventory_items').select('id, item_name, item_effect, quantity, grade, item_type, icon_url').eq('character_id', characterId).order('created_at');
+      itemsResult = withoutItemId.error ? itemsResult : { ...withoutItemId, data: (withoutItemId.data || []).map((item) => ({ ...item, item_id: null })) };
+    }
     if (itemsResult.error) {
       const legacyItemsResult = await supabase.from('inventory_items').select('id, item_name, item_effect, quantity, grade, item_type').eq('character_id', characterId).order('created_at');
-      if (!legacyItemsResult.error) itemsResult = { ...legacyItemsResult, data: (legacyItemsResult.data || []).map((item) => ({ ...item, icon_url: '' })) };
+      if (!legacyItemsResult.error) itemsResult = { ...legacyItemsResult, data: (legacyItemsResult.data || []).map((item) => ({ ...item, item_id: null, icon_url: '' })) };
     }
     let cardsResult = await supabase.from('character_cards').select('id, card_name, card_effect, quantity, energy, grade').eq('character_id', characterId).order('created_at');
     // Older databases do not have the optional energy column yet.
@@ -1309,8 +1390,11 @@
   async function saveInventoryWithIconFallback(rows) {
     if (!rows.length) return null;
     let result = await supabase.from('inventory_items').insert(rows);
+    if (result.error && /item_id|column|schema cache/i.test(result.error.message)) {
+      result = await supabase.from('inventory_items').insert(rows.map(({ item_id, ...item }) => item));
+    }
     if (result.error && /icon_url|column|schema cache/i.test(result.error.message)) {
-      result = await supabase.from('inventory_items').insert(rows.map(({ icon_url, ...item }) => item));
+      result = await supabase.from('inventory_items').insert(rows.map(({ item_id, icon_url, ...item }) => item));
     }
     return result.error || null;
   }
@@ -1546,12 +1630,18 @@
     {:else if isAdminCharacterPage && (!authReady || profileLoading || adminDetailLoading)}
       <section class="character-detail-page panel"><div class="empty-state"><span>◌</span><strong>캐릭터 상세 정보를 불러오는 중이에요</strong></div></section>
     {:else if isAdminCharacterPage && isAdmin && adminSelectedCharacter}
-      <section class="character-detail-page panel"><a class="back-link" href="#admin">← 관리자 관리 페이지로 돌아가기</a><div class="admin-detail-header">{#if adminSelectedCharacter.avatar_url}<img src={adminSelectedCharacter.avatar_url} alt={`${adminSelectedCharacter.name} 프로필 사진`} />{:else}<span class="admin-detail-avatar">{adminSelectedCharacter.name.slice(0, 1)}</span>{/if}<div><p class="eyebrow">CHARACTER PROFILE</p><h1>{adminSelectedCharacter.name}</h1><p>{adminSelectedCharacter.nickname || '모험가'} · {adminSelectedCharacter.role_name || '역할 미등록'}</p></div><button class="danger-btn" type="button" on:click={deleteAdminCharacter}>캐릭터 삭제</button></div><form class="character-form" on:submit|preventDefault={saveAdminCharacter}><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">CHARACTER SHEET</p><h2>기본 정보</h2></div></div><div class="field-grid"><label>캐릭터 이름<input bind:value={adminCharacterForm.name} /></label><label>역할명<input bind:value={adminCharacterForm.roleName} /></label><label>나이<input bind:value={adminCharacterForm.age} type="number" min="0" /></label><label>키 (cm)<input bind:value={adminCharacterForm.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminCharacterForm.weight} type="number" min="0" step="0.1" /></label><label class="field-wide">역할 특징<textarea bind:value={adminCharacterForm.roleTraits} rows="5"></textarea></label></div></div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">COMBAT STATUS</p><h2>전투 정보</h2></div></div><div class="combat-grid"><label>레벨<input bind:value={adminCharacterForm.level} type="number" min="1" /></label><label>돈<input bind:value={adminCharacterForm.money} type="number" min="0" /></label><label>현재 HP<input bind:value={adminCharacterForm.hp} type="number" min="0" /></label><label>최대 HP<input bind:value={adminCharacterForm.maxHp} type="number" min="0" /></label><label class="field-wide">전투 메모<textarea bind:value={adminCharacterForm.combatNotes} rows="3"></textarea></label></div></div><div class="form-section admin-detail-section extra-record-section"><div class="form-section-head"><div><p class="eyebrow">PERSONAL NOTES</p><h2>추가 기록</h2></div><span class="form-hint">게시판형 기록</span></div>{#if extraRecords.length}<div class="record-board">{#each extraRecords as record}<article class="record-board-item"><div class="record-board-meta"><strong>{record.title}</strong><span>{record.authorName} · {new Date(record.created_at).toLocaleDateString('ko-KR')}</span></div><p>{record.content}</p>{#if isAdmin || record.author_id === user?.id}<button class="record-delete" type="button" on:click={() => deleteExtraRecord(record)}>기록 삭제</button>{/if}</article>{/each}</div>{:else}<div class="repeat-empty">등록된 추가 기록이 없습니다.</div>{/if}<div class="record-compose"><input bind:value={extraRecordForm.title} placeholder="기록 제목" /><textarea bind:value={extraRecordForm.content} rows="5" placeholder="소환수, 개인 특징, 장기 목표 등 기록할 내용을 작성해 주세요."></textarea><button class="primary-btn" type="button" on:click={saveExtraRecord} disabled={extraRecordSaving}>{extraRecordSaving ? '등록 중…' : '기록 등록'} <span>↗</span></button></div></div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">INVENTORY</p><h2>인벤토리</h2></div><button class="subtle-btn" type="button" on:click={newAdminInventoryItem}>+ 아이템 추가</button></div>{#if adminInventory.length}<div class="admin-inventory-grid">{#each adminInventory as item, index}<article class="admin-inventory-card"><div class="admin-item-icon">{#if isImageIcon(getInventoryIcon(item))}<img src={getInventoryIcon(item)} alt="" />{:else}{getInventoryIcon(item)}{/if}</div><div class="admin-item-fields"><input bind:value={item.item_name} placeholder="아이템명" /><textarea bind:value={item.item_effect} rows="3" placeholder="아이템 효과"></textarea><div class="admin-item-meta"><input bind:value={item.quantity} type="number" min="1" placeholder="개수" /><select bind:value={item.grade}>{#each inventoryGrades as grade}<option>{grade}</option>{/each}</select><select bind:value={item.item_type}>{#each inventoryTypes as type}<option>{type}</option>{/each}</select></div><label class="item-image-picker">아이콘 이미지<input type="file" accept="image/png,image/jpeg,image/webp" on:change={(event) => handleAdminInventoryImage(event, index)} /></label></div><button class="icon-btn" type="button" on:click={() => removeAdminInventory(index)} aria-label="아이템 삭제">×</button></article>{/each}</div>{:else}<div class="repeat-empty">등록된 아이템이 없습니다.</div>{/if}</div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">CARDS</p><h2>보유 카드</h2></div><button class="subtle-btn" type="button" on:click={newAdminCard}>+ 카드 추가</button></div>{#if adminCards.length}<div class="admin-cards-grid">{#each adminCards as card, index}<article class="admin-card-editor"><div class="owned-card-top"><input bind:value={card.card_name} placeholder="카드명" /><span>{card.energy || 0} energy</span></div><textarea bind:value={card.card_effect} rows="4" placeholder="카드 효과"></textarea><div class="admin-item-meta"><input bind:value={card.quantity} type="number" min="1" placeholder="개수" /><input bind:value={card.energy} type="number" min="0" placeholder="사용 에너지" /><select bind:value={card.grade}>{#each cardGrades as grade}<option>{grade}</option>{/each}</select><button class="icon-btn" type="button" on:click={() => removeAdminCard(index)} aria-label="카드 삭제">×</button></div></article>{/each}</div>{:else}<div class="repeat-empty">등록된 카드가 없습니다.</div>{/if}</div><div class="form-actions admin-detail-actions"><button class="primary-btn" type="submit" disabled={adminCharacterSaving}>{adminCharacterSaving ? '저장 중…' : '변경사항 저장'} <span>↗</span></button></div></form></section>
+      <section class="character-detail-page panel"><a class="back-link" href="#admin">← 관리자 관리 페이지로 돌아가기</a><div class="admin-detail-header">{#if adminSelectedCharacter.avatar_url}<img src={adminSelectedCharacter.avatar_url} alt={`${adminSelectedCharacter.name} 프로필 사진`} />{:else}<span class="admin-detail-avatar">{adminSelectedCharacter.name.slice(0, 1)}</span>{/if}<div><p class="eyebrow">CHARACTER PROFILE</p><h1>{adminSelectedCharacter.name}</h1><p>{adminSelectedCharacter.nickname || '모험가'} · {adminSelectedCharacter.role_name || '역할 미등록'}</p></div><button class="danger-btn" type="button" on:click={deleteAdminCharacter}>캐릭터 삭제</button></div><form class="character-form" on:submit|preventDefault={saveAdminCharacter}><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">CHARACTER SHEET</p><h2>기본 정보</h2></div></div><div class="field-grid"><label>캐릭터 이름<input bind:value={adminCharacterForm.name} /></label><label>역할명<input bind:value={adminCharacterForm.roleName} /></label><label>나이<input bind:value={adminCharacterForm.age} type="number" min="0" /></label><label>키 (cm)<input bind:value={adminCharacterForm.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminCharacterForm.weight} type="number" min="0" step="0.1" /></label><label class="field-wide">역할 특징<textarea bind:value={adminCharacterForm.roleTraits} rows="5"></textarea></label></div></div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">COMBAT STATUS</p><h2>전투 정보</h2></div></div><div class="combat-grid"><label>레벨<input bind:value={adminCharacterForm.level} type="number" min="1" /></label><label>돈<input bind:value={adminCharacterForm.money} type="number" min="0" /></label><label>현재 HP<input bind:value={adminCharacterForm.hp} type="number" min="0" /></label><label>최대 HP<input bind:value={adminCharacterForm.maxHp} type="number" min="0" /></label><label class="field-wide">전투 메모<textarea bind:value={adminCharacterForm.combatNotes} rows="3"></textarea></label></div></div><div class="form-section admin-detail-section extra-record-section"><div class="form-section-head"><div><p class="eyebrow">PERSONAL NOTES</p><h2>추가 기록</h2></div><span class="form-hint">게시판형 기록</span></div>{#if extraRecords.length}<div class="record-board">{#each extraRecords as record}<article class="record-board-item"><div class="record-board-meta"><strong>{record.title}</strong><span>{record.authorName} · {new Date(record.created_at).toLocaleDateString('ko-KR')}</span></div><p>{record.content}</p>{#if isAdmin || record.author_id === user?.id}<button class="record-delete" type="button" on:click={() => deleteExtraRecord(record)}>기록 삭제</button>{/if}</article>{/each}</div>{:else}<div class="repeat-empty">등록된 추가 기록이 없습니다.</div>{/if}<div class="record-compose"><input bind:value={extraRecordForm.title} placeholder="기록 제목" /><textarea bind:value={extraRecordForm.content} rows="5" placeholder="소환수, 개인 특징, 장기 목표 등 기록할 내용을 작성해 주세요."></textarea><button class="primary-btn" type="button" on:click={saveExtraRecord} disabled={extraRecordSaving}>{extraRecordSaving ? '등록 중…' : '기록 등록'} <span>↗</span></button></div></div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">INVENTORY</p><h2>인벤토리</h2></div><div class="form-head-actions"><a class="subtle-btn" href="#admin-items">아이템 테이블 관리</a><button class="subtle-btn" type="button" on:click={newAdminInventoryItem}>+ 직접 입력</button></div></div><div class="inventory-picker"><input bind:value={inventorySearch} placeholder="아이템 테이블에서 검색해 인벤토리에 추가" />{#if itemCatalogError}<div class="repeat-empty">아이템 목록을 불러오지 못했습니다: {itemCatalogError}</div>{:else if itemCatalogLoading}<div class="repeat-empty">아이템 목록을 불러오는 중이에요.</div>{:else if inventorySearch.trim()}{#if inventorySearchResults.length}<div class="inventory-picker-results">{#each inventorySearchResults as catalogItem}<button class="inventory-picker-result" type="button" on:click={() => addCatalogItemToInventory(catalogItem)}><span class="admin-item-icon">{#if isImageIcon(catalogItemIcon(catalogItem))}<img src={catalogItemIcon(catalogItem)} alt="" />{:else}{catalogItemIcon(catalogItem)}{/if}</span><span class="inventory-picker-copy"><strong>{catalogItem.name}</strong><small>{catalogItem.grade} · {catalogItem.item_type}</small></span><span class="inventory-picker-add">+ 담기</span></button>{/each}</div>{:else}<div class="repeat-empty">검색 결과가 없습니다. 아이템 추가 페이지에서 먼저 등록해 주세요.</div>{/if}{/if}</div>{#if adminInventory.length}<div class="admin-inventory-grid">{#each adminInventory as item, index}<article class="admin-inventory-card"><div class="admin-item-icon">{#if isImageIcon(getInventoryIcon(item))}<img src={getInventoryIcon(item)} alt="" />{:else}{getInventoryIcon(item)}{/if}</div><div class="admin-item-fields"><input bind:value={item.item_name} placeholder="아이템명" /><textarea bind:value={item.item_effect} rows="3" placeholder="아이템 효과"></textarea><div class="admin-item-meta"><input bind:value={item.quantity} type="number" min="1" placeholder="개수" /><select bind:value={item.grade}>{#each inventoryGrades as grade}<option>{grade}</option>{/each}</select><select bind:value={item.item_type}>{#each inventoryTypes as type}<option>{type}</option>{/each}</select></div><label class="item-image-picker">아이콘 이미지<input type="file" accept="image/png,image/jpeg,image/webp" on:change={(event) => handleAdminInventoryImage(event, index)} /></label></div><button class="icon-btn" type="button" on:click={() => removeAdminInventory(index)} aria-label="아이템 삭제">×</button></article>{/each}</div>{:else}<div class="repeat-empty">등록된 아이템이 없습니다.</div>{/if}</div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">CARDS</p><h2>보유 카드</h2></div><button class="subtle-btn" type="button" on:click={newAdminCard}>+ 카드 추가</button></div>{#if adminCards.length}<div class="admin-cards-grid">{#each adminCards as card, index}<article class="admin-card-editor"><div class="owned-card-top"><input bind:value={card.card_name} placeholder="카드명" /><span>{card.energy || 0} energy</span></div><textarea bind:value={card.card_effect} rows="4" placeholder="카드 효과"></textarea><div class="admin-item-meta"><input bind:value={card.quantity} type="number" min="1" placeholder="개수" /><input bind:value={card.energy} type="number" min="0" placeholder="사용 에너지" /><select bind:value={card.grade}>{#each cardGrades as grade}<option>{grade}</option>{/each}</select><button class="icon-btn" type="button" on:click={() => removeAdminCard(index)} aria-label="카드 삭제">×</button></div></article>{/each}</div>{:else}<div class="repeat-empty">등록된 카드가 없습니다.</div>{/if}</div><div class="form-actions admin-detail-actions"><button class="primary-btn" type="submit" disabled={adminCharacterSaving}>{adminCharacterSaving ? '저장 중…' : '변경사항 저장'} <span>↗</span></button></div></form></section>
     {:else if isAdminPage && (!authReady || profileLoading)}
       <section class="about-page panel"><p class="eyebrow">CHECKING ACCESS</p><h1>관리자 권한을<br /><em>확인하는 중입니다</em></h1><p class="about-lead">잠시만 기다려 주세요.</p></section>
     {:else if isAdminPage && isAdmin}
-      <section class="admin-page panel"><div class="page-heading"><p class="eyebrow">CAMPAIGN ADMIN</p><h1>관리자 관리 페이지</h1><p>플레이어 계정과 마이페이지 정보를 관리합니다.</p></div><div class="admin-layout"><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">ADVENTURER ACCOUNTS</p><h2>플레이어 계정 · 캐릭터 생성</h2></div></div><form class="editor-form" on:submit|preventDefault={createPlayerAccount}><div class="field-grid"><label>로그인 아이디<input bind:value={adminForm.loginId} placeholder="플레이어 아이디" /></label><label>초기 비밀번호<input bind:value={adminForm.password} type="password" minlength="8" placeholder="8자 이상" /></label><label>표시 이름<input bind:value={adminForm.nickname} placeholder="플레이어 이름" /></label><label>캐릭터 이름<input bind:value={adminForm.character.name} placeholder="캐릭터 이름" /></label><label>역할명<input bind:value={adminForm.character.roleName} placeholder="역할명" /></label><label>나이<input bind:value={adminForm.character.age} type="number" min="0" placeholder="나이" /></label><label class="field-wide">역할 특징<textarea bind:value={adminForm.character.roleTraits} rows="3" placeholder="역할의 특징"></textarea></label><label>키 (cm)<input bind:value={adminForm.character.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminForm.character.weight} type="number" min="0" step="0.1" /></label></div><button class="primary-btn" type="submit" disabled={accountSaving}>{accountSaving ? '생성 중…' : '계정과 캐릭터 생성'} <span>↗</span></button></form><p class="form-note">로그인 아이디는 이메일 형식이나 영문·숫자 형식으로 제한하지 않습니다. 비밀번호만 8자 이상 입력해 주세요.</p></section><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">마이페이지 관리</p><h2>전체 캐릭터 목록</h2></div></div>{#if adminLoading}<div class="repeat-empty">목록을 불러오는 중이에요.</div>{:else if adminCharacters.length}{#each adminCharacters as item}<div class="character-list-item"><span class="avatar mint">{item.name.slice(0, 1)}</span><div><strong>{item.name}</strong><p>{item.nickname} · {item.role_name || '역할 미등록'}</p></div><span class="character-age">{item.age ? `${item.age}세` : '나이 미등록'}</span><button class="subtle-btn character-view-btn" type="button" on:click={() => selectAdminCharacter(item)}>상세보기</button></div>{/each}{:else}<div class="repeat-empty">아직 등록된 캐릭터가 없습니다.</div>{/if}</section><section class="admin-card character-detail-card">{#if adminSelectedCharacter}<div class="form-section-head"><div><p class="eyebrow">CHARACTER DETAIL</p><h2>{adminSelectedCharacter.name}</h2></div><button class="danger-btn" type="button" on:click={deleteAdminCharacter}>캐릭터 삭제</button></div><form class="editor-form" on:submit|preventDefault={saveAdminCharacter}><div class="field-grid"><label>캐릭터 이름<input bind:value={adminCharacterForm.name} /></label><label>역할명<input bind:value={adminCharacterForm.roleName} /></label><label class="field-wide">역할 특징<textarea bind:value={adminCharacterForm.roleTraits} rows="5"></textarea></label><label>나이<input bind:value={adminCharacterForm.age} type="number" min="0" /></label><label>키 (cm)<input bind:value={adminCharacterForm.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminCharacterForm.weight} type="number" min="0" step="0.1" /></label></div><div class="form-actions"><button class="primary-btn" type="submit" disabled={adminCharacterSaving}>{adminCharacterSaving ? '저장 중…' : '캐릭터 정보 저장'} <span>↗</span></button></div></form>{:else}<div class="character-detail-empty"><span>✦</span><strong>캐릭터를 선택해 주세요</strong><p>목록에서 상세보기를 누르면 정보를 수정하거나 삭제할 수 있습니다.</p></div>{/if}</section></div></section>
+      <section class="admin-page panel"><div class="page-heading"><p class="eyebrow">CAMPAIGN ADMIN</p><h1>관리자 관리 페이지</h1><p>플레이어 계정과 캐릭터 정보를 관리합니다.</p></div><div class="admin-shell"><aside class="profile-sidebar admin-sidebar"><a class="active" href="#admin">사용자 관리<span>PLAYERS</span></a><a href="#admin-items">아이템 추가<span>ITEMS</span></a></aside><div class="admin-shell-content"><div class="admin-layout"><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">ADVENTURER ACCOUNTS</p><h2>플레이어 계정 · 캐릭터 생성</h2></div></div><form class="editor-form" on:submit|preventDefault={createPlayerAccount}><div class="field-grid"><label>로그인 아이디<input bind:value={adminForm.loginId} placeholder="플레이어 아이디" /></label><label>초기 비밀번호<input bind:value={adminForm.password} type="password" minlength="8" placeholder="8자 이상" /></label><label>표시 이름<input bind:value={adminForm.nickname} placeholder="플레이어 이름" /></label><label>캐릭터 이름<input bind:value={adminForm.character.name} placeholder="캐릭터 이름" /></label><label>역할명<input bind:value={adminForm.character.roleName} placeholder="역할명" /></label><label>나이<input bind:value={adminForm.character.age} type="number" min="0" placeholder="나이" /></label><label class="field-wide">역할 특징<textarea bind:value={adminForm.character.roleTraits} rows="3" placeholder="역할의 특징"></textarea></label><label>키 (cm)<input bind:value={adminForm.character.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminForm.character.weight} type="number" min="0" step="0.1" /></label></div><button class="primary-btn" type="submit" disabled={accountSaving}>{accountSaving ? '생성 중…' : '계정과 캐릭터 생성'} <span>↗</span></button></form><p class="form-note">로그인 아이디는 이메일 형식이나 영문·숫자 형식으로 제한하지 않습니다. 비밀번호만 8자 이상 입력해 주세요.</p></section><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">마이페이지 관리</p><h2>전체 캐릭터 목록</h2></div></div>{#if adminLoading}<div class="repeat-empty">목록을 불러오는 중이에요.</div>{:else if adminCharacters.length}{#each adminCharacters as item}<div class="character-list-item"><span class="avatar mint">{item.name.slice(0, 1)}</span><div><strong>{item.name}</strong><p>{item.nickname} · {item.role_name || '역할 미등록'}</p></div><span class="character-age">{item.age ? `${item.age}세` : '나이 미등록'}</span><button class="subtle-btn character-view-btn" type="button" on:click={() => selectAdminCharacter(item)}>상세보기</button></div>{/each}{:else}<div class="repeat-empty">아직 등록된 캐릭터가 없습니다.</div>{/if}</section><section class="admin-card character-detail-card">{#if adminSelectedCharacter}<div class="form-section-head"><div><p class="eyebrow">CHARACTER DETAIL</p><h2>{adminSelectedCharacter.name}</h2></div><button class="danger-btn" type="button" on:click={deleteAdminCharacter}>캐릭터 삭제</button></div><form class="editor-form" on:submit|preventDefault={saveAdminCharacter}><div class="field-grid"><label>캐릭터 이름<input bind:value={adminCharacterForm.name} /></label><label>역할명<input bind:value={adminCharacterForm.roleName} /></label><label class="field-wide">역할 특징<textarea bind:value={adminCharacterForm.roleTraits} rows="5"></textarea></label><label>나이<input bind:value={adminCharacterForm.age} type="number" min="0" /></label><label>키 (cm)<input bind:value={adminCharacterForm.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminCharacterForm.weight} type="number" min="0" step="0.1" /></label></div><div class="form-actions"><button class="primary-btn" type="submit" disabled={adminCharacterSaving}>{adminCharacterSaving ? '저장 중…' : '캐릭터 정보 저장'} <span>↗</span></button></div></form>{:else}<div class="character-detail-empty"><span>✦</span><strong>캐릭터를 선택해 주세요</strong><p>목록에서 상세보기를 누르면 정보를 수정하거나 삭제할 수 있습니다.</p></div>{/if}</section></div></div></div></section>
     {:else if isAdminPage}
+      <section class="about-page panel"><p class="eyebrow">ACCESS RESTRICTED</p><h1>관리자 권한이<br /><em>필요합니다</em></h1><p class="about-lead">이 페이지는 캠페인 관리자만 이용할 수 있습니다.</p><a class="primary-btn about-button" href={user ? '#mypage' : '#home'}>{user ? '마이페이지로 돌아가기' : '홈으로 돌아가기'} <span>→</span></a></section>
+    {:else if isAdminItemsPage && (!authReady || profileLoading)}
+      <section class="about-page panel"><p class="eyebrow">CHECKING ACCESS</p><h1>관리자 권한을<br /><em>확인하는 중입니다</em></h1><p class="about-lead">잠시만 기다려 주세요.</p></section>
+    {:else if isAdminItemsPage && isAdmin}
+      <section class="admin-page panel"><div class="page-heading"><p class="eyebrow">ITEM CATALOG</p><h1>아이템 추가</h1><p>아이템을 아이템 테이블에 등록하면 캐릭터 인벤토리에서 검색해 담을 수 있습니다.</p></div><div class="admin-shell"><aside class="profile-sidebar admin-sidebar"><a href="#admin">사용자 관리<span>PLAYERS</span></a><a class="active" href="#admin-items">아이템 추가<span>ITEMS</span></a></aside><div class="admin-shell-content"><div class="admin-layout"><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">{itemForm.id ? 'EDIT ITEM' : 'NEW ITEM'}</p><h2>{itemForm.id ? '아이템 수정' : '아이템 등록'}</h2></div>{#if itemForm.id}<button class="subtle-btn" type="button" on:click={resetItemForm}>새 아이템 작성</button>{/if}</div><form class="editor-form" on:submit|preventDefault={saveItem}><div class="field-grid"><label>아이템 이름<input bind:value={itemForm.name} placeholder="예: 치유 물약" /></label><label>등급<select bind:value={itemForm.grade}>{#each inventoryGrades as grade}<option>{grade}</option>{/each}</select></label><label>종류<select bind:value={itemForm.item_type}>{#each inventoryTypes as type}<option>{type}</option>{/each}</select></label><label class="item-image-picker">아이콘 이미지<input type="file" accept="image/png,image/jpeg,image/webp" on:change={handleItemIconChange} /></label><label class="field-wide">아이템 효과<textarea bind:value={itemForm.effect} rows="4" placeholder="아이템 효과와 설명"></textarea></label></div><div class="item-form-preview"><span class="admin-item-icon">{#if isImageIcon(catalogItemIcon(itemForm))}<img src={catalogItemIcon(itemForm)} alt="" />{:else}{catalogItemIcon(itemForm)}{/if}</span><span>{itemForm.name || '아이템 미리보기'}</span></div><div class="form-actions"><button class="primary-btn" type="submit" disabled={itemSaving}>{itemSaving ? '저장 중…' : itemForm.id ? '아이템 수정' : '아이템 등록'} <span>↗</span></button></div></form></section><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">ITEM LIST</p><h2>등록된 아이템</h2></div><span class="form-hint">{itemCatalog.length}개</span></div><input class="item-search" bind:value={itemSearch} placeholder="아이템 이름 · 효과 검색" />{#if itemCatalogLoading}<div class="repeat-empty">아이템 목록을 불러오는 중이에요.</div>{:else if itemCatalogError}<div class="error-box">아이템 테이블을 확인해 주세요: {itemCatalogError}</div>{:else if filteredItemCatalog.length}<div class="item-catalog-list">{#each filteredItemCatalog as item}<article class="item-catalog-row"><span class="admin-item-icon">{#if isImageIcon(catalogItemIcon(item))}<img src={catalogItemIcon(item)} alt="" />{:else}{catalogItemIcon(item)}{/if}</span><div class="item-catalog-copy"><strong>{item.name}</strong><small>{item.grade} · {item.item_type}</small><p>{item.effect || '등록된 효과가 없습니다.'}</p></div><div class="item-catalog-actions"><button class="subtle-btn" type="button" on:click={() => editItem(item)}>수정</button><button class="danger-btn" type="button" on:click={() => deleteItem(item)}>삭제</button></div></article>{/each}</div>{:else}<div class="repeat-empty">등록된 아이템이 없습니다.</div>{/if}</section></div></div></div></section>
+    {:else if isAdminItemsPage}
       <section class="about-page panel"><p class="eyebrow">ACCESS RESTRICTED</p><h1>관리자 권한이<br /><em>필요합니다</em></h1><p class="about-lead">이 페이지는 캠페인 관리자만 이용할 수 있습니다.</p><a class="primary-btn about-button" href={user ? '#mypage' : '#home'}>{user ? '마이페이지로 돌아가기' : '홈으로 돌아가기'} <span>→</span></a></section>
      {/if}
      {/key}
