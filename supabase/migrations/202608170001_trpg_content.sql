@@ -7,6 +7,11 @@ create extension if not exists pgcrypto;
 -- owner_id, class_name, content, or status so existing records remain compatible.
 update public.boards set is_public = false where slug = 'characters';
 
+insert into public.boards (slug, name, description, sort_order, is_public)
+values ('npc', 'NPC 게시판', 'NPC 초상화 · 성격 · 관계 · 특징', 25, true)
+on conflict (slug) do update set name = excluded.name, description = excluded.description, is_public = true;
+update public.boards set description = '세계관 · 대륙 · 국가' where slug = 'world';
+
 alter table public.characters add column if not exists role_name text not null default '';
 alter table public.characters add column if not exists role_traits text not null default '';
 alter table public.characters add column if not exists age integer;
@@ -109,6 +114,30 @@ using (exists (select 1 from public.characters c where c.id = character_id and (
 with check (exists (select 1 from public.characters c where c.id = character_id and (c.owner_id = auth.uid() or public.is_admin())));
 
 alter table public.posts add column if not exists author_id uuid references auth.users(id) on delete set null;
+alter table public.posts add column if not exists image_url text;
+alter table public.posts add column if not exists npc_name text;
+alter table public.posts add column if not exists npc_age integer;
+alter table public.posts add column if not exists npc_gender text;
+alter table public.posts add column if not exists npc_height numeric(6,2);
+alter table public.posts add column if not exists npc_race text;
+alter table public.posts add column if not exists npc_role text;
+alter table public.posts add column if not exists npc_traits text;
+alter table public.posts add column if not exists npc_affiliation text;
+alter table public.posts add column if not exists npc_personality text;
+
+insert into storage.buckets (id, name, public)
+values ('npc-images', 'npc-images', true)
+on conflict (id) do update set public = true;
+
+drop policy if exists "public can view npc images" on storage.objects;
+create policy "public can view npc images" on storage.objects for select to anon, authenticated
+using (bucket_id = 'npc-images');
+drop policy if exists "users can upload npc images" on storage.objects;
+create policy "users can upload npc images" on storage.objects for insert to authenticated
+with check (bucket_id = 'npc-images' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists "users can delete own npc images" on storage.objects;
+create policy "users can delete own npc images" on storage.objects for delete to authenticated
+using (bucket_id = 'npc-images' and (storage.foldername(name))[1] = auth.uid()::text);
 
 alter table public.posts enable row level security;
 drop policy if exists "published posts are publicly readable" on public.posts;
