@@ -1,0 +1,27 @@
+<section class="minigames-page panel">
+  <div class="minigames-hero">
+    <a class="back-link" href="#board/users">← 유저게시판으로 돌아가기</a>
+    <p class="eyebrow">USER BOARD / MINI GAMES</p>
+    <h1>미니게임</h1>
+    <p>세션 중 가볍게 즐기거나 진행에 활용할 수 있는 게임을 모았습니다.</p>
+  </div>
+
+  <div class="minigames-content">
+    <section class="minigame-catalog" aria-labelledby="minigame-list-title">
+      <div class="section-head">
+        <div><p class="eyebrow">GAME LIST</p><h2 id="minigame-list-title">미니게임 목록</h2></div>
+        <span class="result-count">2개의 게임</span>
+      </div>
+      <a class="minigame-card" href="#minigames/dice">
+        <span class="minigame-card-icon" aria-hidden="true">20</span>
+        <span class="minigame-card-copy"><small>DICE TOOL</small><strong>주사위 굴리기</strong><span>D20 판정과 원하는 조합의 주사위를 굴립니다.</span></span>
+        <span class="minigame-card-arrow">→</span>
+      </a>
+      <a class="minigame-card" href="#combat">
+        <span class="minigame-card-icon" aria-hidden="true">⚔</span>
+        <span class="minigame-card-copy"><small>CO-OP CARD BATTLE</small><strong>실시간 카드 전투</strong><span>관리자가 만든 방에 참가해 보유 카드로 함께 싸웁니다.</span></span>
+        <span class="minigame-card-arrow">→</span>
+      </a>
+    </section>
+  </div>
+</section>

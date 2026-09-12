@@ -1,0 +1,25 @@
+import {readFile,writeFile} from 'node:fs/promises';
+let code=await readFile('src/pages/CombatPage.svelte','utf8');
+function replace(old,next){if(!code.includes(old))throw new Error('missing '+old);code=code.replace(old,next);}
+replace("  import BattleConsumables", "  import BattleExtras from '../components/BattleExtras.svelte';\n  import { STATUS_KINDS, EFFECTS } from '../lib/combat';\n  import BattleConsumables");
+replace("  let resourceError = '';", "  let resourceError = '';\n  let monsterCatalog = [];\n  let monsterError = '';\n  let monsterId = '';\n  async function loadMonsters(at=epoch) { try { const r=await supabase.from('combat_monsters').select('*').order('name');if(at!==epoch)return;monsterCatalog=r.data||[];monsterError=r.error ? (['PGRST205','42P01'].includes(r.error.code) ? '몬스터 기능은 add_combat_monsters_relics.sql 적용 후 사용할 수 있습니다.' : r.error.message) : ''; } catch(e){if(at===epoch)monsterError=e.message;} }\n  function addMonster() {const m=monsterCatalog.find(m=>m.id===monsterId);if(m && enemyDraft.length<6)enemyDraft=[...enemyDraft,{...structuredClone(m),catalog_id:m.id}];}");
+replace("  const statusLabels = [['strength', '힘'], ['weak', '약화'], ['vulnerable', '취약'], ['poison', '중독']];", "  const statusLabels = STATUS_KINDS.map(key=>[key,EFFECTS[key]]);");
+replace("  $: enemies = room?.state?.enemies || [];", "  $: enemies = room?.state?.enemies || [];\n  $: allies = [...players,...(room?.state?.summons || [])];\n  $: selectableTargets = selectedSide === 'players' ? allies : enemies;");
+replace("(room?.state?.[selectedSide] || []).some", "selectableTargets.some");
+replace("({ name: e.name, hp: e.max_hp, attack: e.attack, guard: e.guard })", "({ name: e.name, hp: e.max_hp, attack: e.attack, guard: e.guard, initial_powers:e.initial_powers || [], actions:e.actions || [] })");
+replace("    availableConsumables = []; consumableCatalog = []; resourceError = '';", "    availableConsumables = []; consumableCatalog = []; resourceError = '';\n    monsterCatalog=[];monsterError='';monsterId='';\n    if(uid) void loadMonsters(at);");
+replace("            <form on:submit|preventDefault={() => act('configure', { enemies: enemyDraft })}>", `            <div class="battle-monster-picker"><label>등록된 몬스터<select bind:value={monsterId}><option value="">몬스터 선택</option>{#each monsterCatalog as monster}<option value={monster.id}>{monster.name} · HP {monster.hp}</option>{/each}</select></label><button class="subtle-btn" disabled={busy || !monsterId || enemyDraft.length>=6} on:click={addMonster}>편성에 추가</button><button class="subtle-btn" disabled={busy} on:click={()=>loadMonsters()}>목록 새로고침</button><a href="#admin/monsters" target="_blank" rel="noopener">몬스터 관리</a>{#if monsterError}<p class="battle-help">{monsterError}</p>{/if}</div>
+            <form on:submit|preventDefault={() => act('configure', { enemies: enemyDraft })}>`);
+replace('<label>이름<input bind:value={enemy.name}', '<label>이름<input disabled={!!enemy.catalog_id} bind:value={enemy.name}');
+for(const key of ['hp','attack','guard']) replace(`type="number" bind:value={enemy.${key}}`, `type="number" disabled={!!enemy.catalog_id} bind:value={enemy.${key}}`);
+replace('              </div>{/each}', '              </div>{#if enemy.catalog_id || enemy.actions?.length || enemy.initial_powers?.length}<p class="battle-help">시작 파워 {(enemy.powers || enemy.initial_powers || []).map(effectText).join(\' / \') || \'없음\'} · 행동 {enemy.actions?.map(a=>a.name).join(\' → \') || \'기본 순환\'}</p>{/if}{/each}');
+replace('공격 → 방어 → 강타(공격 ×2)를 순환합니다. 적마다 시작 행동이 다릅니다.', '행동을 따로 설정한 몬스터는 등록된 순서로 반복합니다. 기본 몬스터는 공격 → 방어 → 강타(공격 ×2)를 순환합니다. 저장 시 등록된 몬스터의 최신 설정을 복사합니다.');
+replace('enemyIntent(enemy, i, round, players)', 'enemyIntent(enemy, i, round, allies)');
+replace('${intent.label} ${intent.amount}', "${intent.label} ${intent.amount ?? ''}");
+code=code.replaceAll('room.state[selectedSide]', 'selectableTargets');
+replace('      {#if me}<section class="battle-hand-section">', '      <BattleExtras state={room.state} {host} active={room.status===\'active\'} {busy} {canAct} {selectedSide} {selectedTarget} onTarget={id=>selectedTarget=id} onAct={act} />\n      {#if me}<section class="battle-hand-section">');
+replace('    {#if room}<details class="battle-log">', '    {#if room?.status===\'waiting\'}<BattleExtras state={room.state} />{/if}\n    {#if room}<details class="battle-log">');
+replace('<BattleConsumables player={me} {players} {enemies}', '<BattleConsumables player={me} players={allies} {enemies}');
+replace('{#each rule?.on_exhaust || [] as effect}<small>소멸 시 발동: {effectText(effect)}</small>{/each}', '{#each rule?.on_exhaust || [] as effect}<small>소멸 시 발동: {effectText(effect)}</small>{/each}{#each rule?.on_turn_end || [] as effect}<small>손에 남으면 턴 종료: {effectText(effect)}</small>{/each}');
+replace('  .personal-resource', '  .battle-monster-picker { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin-bottom:18px; }\n  .battle-monster-picker label { flex:1; min-width:160px; }\n  .personal-resource');
+await writeFile('src/pages/CombatPage.svelte',code);

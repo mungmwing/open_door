@@ -1,10 +1,31 @@
 <script>
-  import { onMount, afterUpdate } from 'svelte';
+  import { onMount, afterUpdate, tick } from 'svelte';
   import { supabase, supabaseConfig } from './supabaseClient';
-  import { marked } from 'marked';
+  import { renderSafePostMarkdown } from './lib/postRendering';
+  import { plainNpcName, mergeSessionReferences } from './lib/sessionReferences';
   import DOMPurify from 'dompurify';
-  import Editor from '@toast-ui/editor';
-  import '@toast-ui/editor/dist/toastui-editor.css';
+  import HomePage from './pages/HomePage.svelte';
+  import { defaultPersonalEnergy, prepareResourceSave, prepareConsumableSave } from './lib/combatResources';
+  import { buildAdminCardRows, normalizeOwnedCard, prepareCardSave } from './lib/cardPersistence';
+  import { prepareRelicSave } from './lib/combatExpansion';
+  import { formatCombatTestCards } from './lib/combatTest';
+
+  let BoardPage;
+  let PostDetailPage;
+  let AdminItemsPage;
+  let AdminMonstersPage;
+  let WritePage;
+  let MyPage;
+  let AdminMypage;
+  let AdminPage;
+  let AdminCharacterPage;
+  let ShopPage;
+  let AdminShopPage;
+  let AdminCombatTestPage;
+  let CombatPage;
+  let MiniGamesPage;
+  let DiceRollerPage;
+  const routeComponentPromises = new Map();
 
   const fallbackCategories = [
     { name: '전체', slug: 'all', count: 0, description: '모든 게시글 모아보기' },
@@ -18,12 +39,9 @@
     { name: 'BGM 게시판', slug: 'bgm', count: 0, description: '맵 · 캐릭터 · 장면별 배경음악' }
   ];
   const inventoryGrades = ['일반', '고급', '희귀', '영웅', '전설', '신화'];
-  const inventoryTypes = ['유물', '장비', '소비', '기타'];
+  const inventoryTypes = ['유물', '장비', '소비', '상자', '기타'];
   const cardGrades = ['기본', '일반', '고급', '희귀', '특수'];
 
-  let audio;
-  let muted = false;
-  let volume = 0.4;
   let showLogin = false;
   let notice = '';
   let loginId = '';
@@ -31,6 +49,7 @@
   let session = null;
   let user = null;
   let profile = null;
+  let profileAccentColor = '#d8bd75';
   let profileLoading = false;
   let adminProfileForm = { nickname: '', newPassword: '', confirmPassword: '' };
   let adminProfileImageFile = null;
@@ -45,13 +64,21 @@
   let currentRoute = 'home';
   let dbStatus = 'loading';
   let dbError = '';
+  let databaseLoadedAt = 0;
+  let databaseLoadPromise;
   let categories = fallbackCategories;
   let notices = [];
   let posts = [];
+  let sessionMetadataLoaded = false;
+  let sessionMetadataPromise;
   let detailPost = null;
   let detailHtml = '';
+  let privatePostUnlocked = false;
+  let privatePostError = '';
   let detailRequestId = 0;
   let detailLoading = false;
+  let detailError = '';
+  let detailController;
   let postSaving = false;
   let characterLoading = false;
   let characterSaving = false;
@@ -68,30 +95,68 @@
   let npcOptions = [];
   let bgmOptions = [];
   let sessionEntries = [];
+  let draggedSessionEntryId = '';
+  let sessionDragPointerY = 0;
+  let sessionDragScrollFrame = 0;
+  let sessionDragEventsReady = false;
   let sessionParticipants = [];
+  let sessionActorParticipants = [];
   let sessionBgmIds = [];
   let selectedInventoryItem = null;
+  let equipmentSaving = false;
   let profileImageFile = null;
   let profileImagePreview = '';
   let inventory = [];
+  let equippedInventory = [];
   let cards = [];
   let adminCharacters = [];
   let adminSelectedCharacter = null;
-  let adminCharacterForm = { name: '', roleName: '', roleTraits: '', age: '', height: '', weight: '', money: 0, level: 1, hp: 0, maxHp: 0, mp: 0, maxMp: 0, attack: 0, defense: 0, combatNotes: '' };
+  let adminCharacterForm = { name: '', roleName: '', roleTraits: '', age: '', height: '', weight: '', money: '0', level: 1, hp: 0, maxHp: 0, mp: 0, maxMp: 0, attack: 0, defense: 0, combatNotes: '' };
   let adminCharacterSaving = false;
   let adminInventory = [];
+  let adminInventoryBaseline = '';
+  let adminInventoryVersion = null;
+  let adminEquippedInventory = [];
   let adminCards = [];
   let adminDetailLoading = false;
   let catalogItems = [];
   let catalogLoading = false;
+  let catalogLoadedAt = 0;
+  let catalogLoadPromise;
   let catalogSearchTerm = '';
   let inventorySearchTerm = '';
-  let itemForm = { id: '', name: '', item_effect: '', grade: '일반', item_type: '기타', icon_url: '' };
+  let itemForm = { id: '', name: '', item_effect: '', item_description: '', grade: '일반', item_type: '기타', equipment_slot: '', icon_url: '', chest_reward_item_ids: [], chest_reward_count: 1, combat_effects:null, relic_effects:null };
+  let shopListings = [];
+  let shopLoading = false;
+  let shopError = '';
+  let shopBalance = null;
+  let shopPurchaseQuantities = {};
+  let shopPurchaseSaving = false;
+  let adminShopListings = [];
+  let adminShopLoading = false;
+  let shopAdminSaving = false;
+  let shopForm = { id: '', item_id: '', price_g: 0, personal_limit: '', total_limit: '', sold_count: 0, is_active: false };
+  let combatTestSelectedCharacterIds = [];
+  let combatTestPlayers = [];
+  let combatTestLoading = false;
+  let combatTestStarted = false;
+  let combatTestTurn = 0;
   let itemFormImageFile = null;
   let itemFormImagePreview = '';
   let itemSaving = false;
+  let openingChest = false;
+  let chestOpeningDone = false;
+  let chestOpeningReady = false;
+  let chestOpeningRewards = [];
+  let chestOpeningTiles = [];
+  let rouletteTrackStyle = '';
   let characterRequestId = 0;
+  let characterLoadedAt = 0;
+  let characterLoadedKey = '';
+  const characterLoadPromises = new Map();
   let accountSaving = false;
+  let accountSettingsSaving = false;
+  let accountForm = { newPassword: '', confirmPassword: '' };
   let detailComments = [];
   let commentText = '';
   let commentReplyTo = null;
@@ -104,21 +169,24 @@
   let currentPage = 1;
   const pageSize = 10;
 
-  let postForm = { title: '', content: '', postType: 'notice', npcName: '', npcAge: '', npcGender: '', npcHeight: '', npcRace: '', npcRole: '', npcTraits: '', npcAffiliation: '', npcPersonality: '', bgmCategory: 'map', bgmUrl: '', bgmFile: null, imageFile: null };
+  let postForm = { title: '', content: '', postType: 'notice', isPrivate: false, privatePassword: '', npcName: '', npcAge: '', npcGender: '', npcHeight: '', npcRace: '', npcRole: '', npcTraits: '', npcAffiliation: '', npcPersonality: '', bgmCategory: 'map', bgmUrl: '', bgmFile: null, imageFile: null };
   let editingPostId = null;
   let editingPostAuthorId = null;
   let editLoading = false;
   let editRequestId = 0;
   let npcImagePreview = '';
+  let npcOriginalImageUrl = '';
   let richEditorElement;
   let richEditor;
+  let richEditorLoader;
   let richEditorSyncTimer;
   let richEditorSyncing = false;
+  let decorationFingerprint = '';
   let writeBoardSlug = 'users';
   let characterForm = { name: '', roleName: '', roleTraits: '', age: '', height: '', weight: '' };
   let adminForm = {
     loginId: '', password: '', nickname: '',
-    character: { name: '', roleName: '', roleTraits: '', age: '', height: '', weight: '' }
+    character: { name: '', roleName: '', roleTraits: '', age: '', height: '', weight: '', money: '0' }
   };
 
   $: filteredPosts = posts
@@ -128,18 +196,26 @@
   $: filteredPageCount = Math.max(1, Math.ceil(filteredPosts.length / pageSize));
   $: pagedFilteredPosts = filteredPosts.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   $: isBoardPage = currentRoute.startsWith('board/');
+  $: isMiniGamesPage = currentRoute === 'minigames';
+  $: isDiceRollerPage = currentRoute === 'minigames/dice';
   $: isPostPage = currentRoute.startsWith('post/');
   $: isWritePage = currentRoute.startsWith('write/');
   $: isEditPage = currentRoute.startsWith('edit/');
   $: isMyPage = currentRoute === 'mypage';
   $: isAdminPage = currentRoute === 'admin';
+  $: isAdminMonstersPage = currentRoute === 'admin/monsters';
   $: isAdminItemsPage = currentRoute === 'admin/items';
-  $: isAdminShellPage = isAdminPage || isAdminItemsPage;
+  $: isShopPage = currentRoute === 'shop';
+  $: isAdminShopPage = currentRoute === 'admin/shop';
+  $: isAdminCombatTestPage = currentRoute === 'admin/combat-test';
+  $: isCombatPage = currentRoute === 'combat' || currentRoute.startsWith('combat/');
+  $: isAdminShellPage = isAdminMonstersPage || isAdminPage || isAdminItemsPage || isAdminShopPage || isAdminCombatTestPage;
   $: isAdminMypage = currentRoute === 'admin-mypage';
   $: isAdminCharacterPage = currentRoute.startsWith('admin-character/');
   $: currentBoard = categories.find((board) => board.slug === currentRoute.replace('board/', '')) || categories[0];
   $: writeBoard = categories.find((board) => board.slug === writeBoardSlug) || categories.find((board) => board.slug === 'users') || categories[0];
   $: sessionPlayerFilterOptions = buildSessionPlayerFilterOptions(posts, adminCharacters);
+  $: sessionActorParticipants = buildSessionActorParticipants(sessionParticipants);
   $: boardPagePosts = posts
     .filter((post) => currentBoard.slug === 'all' || post.category === currentBoard.name)
     .filter((post) => `${post.title} ${post.excerpt} ${post.author}`.toLowerCase().includes(searchTerm.toLowerCase().trim()))
@@ -148,12 +224,44 @@
     .sort((a, b) => sortBy === 'popular' ? b.views - a.views : posts.indexOf(a) - posts.indexOf(b));
   $: boardPageCount = Math.max(1, Math.ceil(boardPagePosts.length / pageSize));
   $: pagedBoardPosts = boardPagePosts.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  $: filteredCatalogItems = catalogItems.filter((item) => `${item.name} ${item.item_effect} ${item.item_type} ${item.grade}`.toLowerCase().includes(catalogSearchTerm.toLowerCase().trim()));
-  $: filteredInventoryCatalogItems = catalogItems.filter((item) => `${item.name} ${item.item_effect}`.toLowerCase().includes(inventorySearchTerm.toLowerCase().trim())).slice(0, 12);
+  $: filteredCatalogItems = catalogItems.filter((item) => `${item.name} ${item.item_effect} ${item.item_description} ${item.item_type} ${item.equipment_slot || ''} ${item.grade}`.toLowerCase().includes(catalogSearchTerm.toLowerCase().trim()));
+  $: filteredInventoryCatalogItems = catalogItems.filter((item) => `${item.name} ${item.item_effect} ${item.item_description}`.toLowerCase().includes(inventorySearchTerm.toLowerCase().trim())).slice(0, 12);
+  $: equippedInventory = getEquippedInventory(inventory);
+  $: adminEquippedInventory = getEquippedInventory(adminInventory);
 
   function showNotice(message) {
     notice = message;
     setTimeout(() => (notice = ''), 2800);
+  }
+
+  function loadRouteComponent(key, loader, assign) {
+    if (routeComponentPromises.has(key)) return routeComponentPromises.get(key);
+    const promise = loader()
+      .then((module) => {
+        assign(module.default);
+        decorationFingerprint = '';
+      })
+      .catch(() => showNotice('페이지 구성 요소를 불러오지 못했습니다. 새로고침해 주세요.'));
+    routeComponentPromises.set(key, promise);
+    return promise;
+  }
+
+  function ensureRouteComponent(route) {
+    if (route === 'combat' || route.startsWith('combat/')) return loadRouteComponent('combat', () => import('./pages/CombatPage.svelte'), (component) => (CombatPage = component));
+    if (route.startsWith('board/')) return loadRouteComponent('board', () => import('./pages/BoardPage.svelte'), (component) => (BoardPage = component));
+    if (route === 'minigames') return loadRouteComponent('minigames', () => import('./pages/MiniGamesPage.svelte'), (component) => (MiniGamesPage = component));
+    if (route === 'minigames/dice') return loadRouteComponent('dice', () => import('./pages/DiceRollerPage.svelte'), (component) => (DiceRollerPage = component));
+    if (route.startsWith('post/')) return loadRouteComponent('post', () => import('./pages/PostDetailPage.svelte'), (component) => (PostDetailPage = component));
+    if (route === 'shop') return loadRouteComponent('shop', () => import('./pages/ShopPage.svelte'), (component) => (ShopPage = component));
+    if (route === 'admin/combat-test') return loadRouteComponent('admin-combat', () => import('./pages/AdminCombatTestPage.svelte'), (component) => (AdminCombatTestPage = component));
+    if (route === 'admin/monsters') return loadRouteComponent('admin-monsters', () => import('./pages/AdminMonstersPage.svelte'), (component) => (AdminMonstersPage = component));
+    if (route === 'admin/items') return loadRouteComponent('admin-items', () => import('./pages/AdminItemsPage.svelte'), (component) => (AdminItemsPage = component));
+    if (route.startsWith('write/') || route.startsWith('edit/')) return loadRouteComponent('write', () => import('./pages/WritePage.svelte'), (component) => (WritePage = component));
+    if (route === 'admin-mypage') return loadRouteComponent('admin-mypage', () => import('./pages/AdminMypage.svelte'), (component) => (AdminMypage = component));
+    if (route === 'admin/shop') return loadRouteComponent('admin-shop', () => import('./pages/AdminShopPage.svelte'), (component) => (AdminShopPage = component));
+    if (route === 'mypage') return loadRouteComponent('mypage', () => import('./pages/MyPage.svelte'), (component) => (MyPage = component));
+    if (route.startsWith('admin-character/')) return loadRouteComponent('admin-character', () => import('./pages/AdminCharacterWorkspace.svelte'), (component) => (AdminCharacterPage = component));
+    if (route === 'admin') return loadRouteComponent('admin', () => import('./pages/AdminPage.svelte'), (component) => (AdminPage = component));
   }
 
   function normalizeLoginId(value) {
@@ -173,9 +281,8 @@
     return { date: `${pad(date.getMonth() + 1)}.${pad(date.getDate())}`, time: `${pad(date.getHours())}:${pad(date.getMinutes())}` };
   }
 
-  const basePostSelect = 'id, board_slug, title, content, excerpt, status, views, created_at, author_id, profiles(nickname, avatar_url), post_comments(count), post_likes(count)';
-  const extendedPostSelect = 'id, board_slug, title, content, excerpt, status, views, created_at, author_id, image_url, youtube_url, bgm_url, bgm_category, post_type, npc_name, npc_age, npc_gender, npc_height, npc_race, npc_role, npc_traits, npc_affiliation, npc_personality, profiles(nickname, avatar_url), post_comments(count), post_likes(count)';
-  const bgmPostSelect = 'id, board_slug, title, content, excerpt, status, views, created_at, author_id, bgm_url, bgm_category, profiles(nickname, avatar_url), post_comments(count), post_likes(count)';
+  const publicPostListSelect = 'id, board_slug, title, excerpt, status, views, created_at, author_id, is_private, image_url, bgm_url, bgm_category, post_type, npc_name, npc_role, author_nickname, author_avatar_url, author_accent_color, comment_count, like_count';
+  const publicPostDetailSelect = 'id, board_slug, title, content, excerpt, status, views, created_at, author_id, is_private, image_url, youtube_url, bgm_url, bgm_category, post_type, npc_name, npc_age, npc_gender, npc_height, npc_race, npc_role, npc_traits, npc_affiliation, npc_personality, author_nickname, author_avatar_url, author_accent_color, comment_count, like_count';
 
   function readEmbeddedNpcData(content = '') {
     const match = content.match(/^<!--OPEN_DOOR_NPC:([A-Za-z0-9+/=]+)-->/);
@@ -186,36 +293,28 @@
     } catch { return { content }; }
   }
 
-  async function loadPostsQuery(queryBuilder) {
-    const extended = await queryBuilder(extendedPostSelect);
-    if (!extended.error) return extended;
-    const withBgm = await queryBuilder(bgmPostSelect);
-    if (!withBgm.error) return withBgm;
-    return queryBuilder(basePostSelect);
-  }
-
   function formatPost(post, boardMap) {
     const sessionData = post.board_slug === 'sessions' ? readEmbeddedSessionData(post.content || '') : { content: post.content || '', entries: [] };
     const bgmData = post.board_slug === 'bgm' ? readEmbeddedBgmData(sessionData.content) : { content: sessionData.content };
     const embedded = readEmbeddedNpcData(bgmData.content);
     post = { ...post, content: embedded.content, image_url: post.image_url || embedded.image_url, bgm_url: post.bgm_url || bgmData.bgm_url, bgm_category: post.bgm_category || bgmData.bgm_category, npc_name: post.npc_name || embedded.npc_name, npc_age: post.npc_age ?? embedded.npc_age, npc_gender: post.npc_gender || embedded.npc_gender, npc_height: post.npc_height ?? embedded.npc_height, npc_race: post.npc_race || embedded.npc_race, npc_role: post.npc_role || embedded.npc_role, npc_traits: post.npc_traits || embedded.npc_traits, npc_affiliation: post.npc_affiliation || embedded.npc_affiliation, npc_personality: post.npc_personality || embedded.npc_personality };
-    const profileData = Array.isArray(post.profiles) ? post.profiles[0] : post.profiles;
+    const profileData = Array.isArray(post.profiles) ? post.profiles[0] : post.profiles || { nickname: post.author_nickname, avatar_url: post.author_avatar_url, accent_color: post.author_accent_color };
     const commentRelation = post.post_comments || post.comments;
     const likeRelation = post.post_likes || post.likes;
-    const commentCount = Array.isArray(commentRelation) ? commentRelation[0]?.count || 0 : 0;
-    const likeCount = Array.isArray(likeRelation) ? likeRelation[0]?.count || 0 : 0;
+    const commentCount = post.comment_count ?? (Array.isArray(commentRelation) ? commentRelation[0]?.count || 0 : 0);
+    const likeCount = post.like_count ?? (Array.isArray(likeRelation) ? likeRelation[0]?.count || 0 : 0);
     const date = formatDate(post.created_at);
     const nickname = profileData?.nickname || '모험가';
     return {
       id: post.id, boardSlug: post.board_slug, category: boardMap.get(post.board_slug)?.name || post.board_slug,
       title: post.board_slug === 'npc' && post.npc_role && post.npc_name ? `[${post.npc_role}] ${post.npc_name}` : post.title, content: post.content || '',
-      excerpt: post.excerpt || post.content?.replace(/\s+/g, ' ').slice(0, 140) || '아직 요약이 등록되지 않은 게시글입니다.',
+      excerpt: post.is_private ? '비밀글입니다. 비밀번호를 입력하면 내용을 확인할 수 있습니다.' : post.excerpt || post.content?.replace(/\s+/g, ' ').slice(0, 140) || '아직 요약이 등록되지 않은 게시글입니다.',
       author: nickname, authorId: post.author_id, date: date.date, time: date.time,
       views: post.views || 0, comments: commentCount, likes: likeCount, avatar: nickname.slice(0, 1).toUpperCase(), avatarUrl: profileData?.avatar_url || '',
-      color: ['lavender', 'mint', 'peach', 'yellow', 'blue'][nickname.charCodeAt(0) % 5],
+      color: ['lavender', 'mint', 'peach', 'yellow', 'blue'][nickname.charCodeAt(0) % 5], authorColor: getReadableAccentColor(profileData?.accent_color),
       imageUrl: post.image_url || '', npcName: post.npc_name || '', npcAge: post.npc_age ?? '', npcGender: post.npc_gender || '',
       npcHeight: post.npc_height ?? '', npcRace: post.npc_race || '', npcRole: post.npc_role || '', npcTraits: post.npc_traits || '',
-      npcAffiliation: post.npc_affiliation || '', npcPersonality: post.npc_personality || '', postType: post.post_type || 'notice', youtubeUrl: post.youtube_url || '', bgmUrl: post.bgm_url || '', bgmCategory: post.bgm_category || 'map', sessionEntries: sessionData.entries, sessionParticipants: Array.isArray(sessionData.participants) ? sessionData.participants : [], sessionBgms: Array.isArray(sessionData.bgms) ? sessionData.bgms : []
+      npcAffiliation: post.npc_affiliation || '', npcPersonality: post.npc_personality || '', postType: post.post_type || 'notice', isPrivate: Boolean(post.is_private), privatePassword: post.private_password || '', youtubeUrl: post.youtube_url || '', bgmUrl: post.bgm_url || '', bgmCategory: post.bgm_category || 'map', sessionEntries: sessionData.entries, sessionParticipants: Array.isArray(sessionData.participants) ? sessionData.participants : [], sessionBgms: Array.isArray(sessionData.bgms) ? sessionData.bgms : []
     };
   }
 
@@ -250,7 +349,8 @@
 
   function renderPostContent(content = '') {
     const markdown = normalizeRichEditorMarkdown(content);
-    return DOMPurify.sanitize(marked.parse(markdown));
+    // Keep a single Enter as a visible line break in the published post.
+    return renderSafePostMarkdown(markdown,html=>DOMPurify.sanitize(html));
   }
 
   function readEmbeddedBgmData(content = '') {
@@ -266,26 +366,50 @@
     return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
   }
 
+  function getReadableAccentColor(value) {
+    const raw = String(value || '').trim();
+    return /^#[0-9a-f]{6}$/i.test(raw) ? raw : '#d8bd75';
+  }
+
+  function sessionAccentStyle(value) {
+    return ` style="--session-accent:${escapeSessionHtml(getReadableAccentColor(value))}"`;
+  }
+
+  async function saveProfileAccentColor(value) {
+    if (!supabase || !user) return;
+    const accentColor = getReadableAccentColor(value);
+    const { error } = await supabase.from('profiles').update({ accent_color: accentColor }).eq('id', user.id);
+    if (error) return showNotice(`프로필 색상 저장에 실패했습니다: ${error.message}`);
+    profile = { ...profile, accent_color: accentColor };
+    profileAccentColor = accentColor;
+  }
+
+  function resolveSessionAccent(entryColor, postColor) {
+    const entryAccent = getReadableAccentColor(entryColor);
+    const postAccent = getReadableAccentColor(postColor);
+    return entryAccent === '#d8bd75' && postAccent !== '#d8bd75' ? postAccent : entryAccent;
+  }
+
   function renderBgmContent(post) {
     const category = { map: 'MAP BGM', character: 'CHARACTER BGM', scene: 'SCENE BGM', etc: 'ETC' }[post.bgmCategory] || 'BGM';
     const player = post.bgmUrl ? `<div class="bgm-detail-player"><span>${category}</span><audio controls preload="metadata" src="${escapeSessionHtml(post.bgmUrl)}"></audio></div>` : '';
     return `${player}${renderPostContent(post.content)}`;
   }
 
-  function renderSessionEntries(entries = [], participants = [], bgms = []) {
+  function renderSessionEntries(entries = [], participants = [], bgms = [], postAccentColor = '') {
     const participantHtml = participants.length ? `<section class="session-log-participants"><strong>세션 참여자</strong><div>${participants.map((participant) => `<span>${escapeSessionHtml(participant.name || '이름 없음')}</span>`).join('')}</div></section>` : '';
     const bgmHtml = bgms.length ? `<section class="session-log-bgms"><strong>세션 BGM</strong><div>${bgms.map((bgm) => `<article><span>${escapeSessionHtml(bgm.title || 'BGM')} · ${escapeSessionHtml(({ map: '맵', character: '캐릭터', scene: '장면', etc: '기타' }[bgm.category] || 'BGM'))}</span><audio controls preload="metadata" src="${escapeSessionHtml(bgm.url || '')}"></audio></article>`).join('')}</div></section>` : '';
     const html = entries.map((entry) => {
-      if (entry.type === 'image') return `<figure class="session-log-image"><img src="${escapeSessionHtml(entry.imageUrl || '')}" alt="세션 장면" />${entry.caption ? `<figcaption>${escapeSessionHtml(entry.caption)}</figcaption>` : ''}</figure>`;
+      if (entry.type === 'image') return `<figure class="session-log-image"><img loading="lazy" decoding="async" src="${escapeSessionHtml(entry.imageUrl || '')}" alt="세션 장면" />${entry.caption ? `<figcaption>${escapeSessionHtml(entry.caption)}</figcaption>` : ''}</figure>`;
       if (entry.type === 'dialogue') {
         const speakerName = entry.speakerName || '???';
         const speakerImage = sessionEntrySpeakerAvatar(entry);
         const avatar = speakerImage
-          ? `<img class="session-dialogue-avatar-image" src="${escapeSessionHtml(speakerImage)}" alt="${escapeSessionHtml(speakerName)} 사진" />`
+          ? `<img class="session-dialogue-avatar-image" loading="lazy" decoding="async" src="${escapeSessionHtml(speakerImage)}" alt="${escapeSessionHtml(speakerName)} 사진" />`
           : `<span class="session-dialogue-avatar-placeholder">${escapeSessionHtml(speakerName.slice(0, 1))}</span>`;
-        return `<div class="session-log-dialogue"><div class="session-dialogue-avatar">${avatar}</div><div class="session-dialogue-copy"><strong>${escapeSessionHtml(speakerName)}</strong><p>&quot;${escapeSessionHtml(entry.text || '')}&quot;</p></div></div>`;
+        return `<div class="session-log-dialogue"${sessionAccentStyle(resolveSessionAccent(entry.accentColor, postAccentColor))}><div class="session-dialogue-avatar">${avatar}</div><div class="session-dialogue-copy"><strong>${escapeSessionHtml(speakerName)}</strong><p>&quot;${escapeSessionHtml(entry.text || '')}&quot;</p></div></div>`;
       }
-      return `<div class="session-log-narration">${entry.actorName ? `<small>${escapeSessionHtml(entry.actorName)}</small>` : ''}<p>${escapeSessionHtml(entry.text || '')}</p></div>`;
+      return `<div class="session-log-narration"${sessionAccentStyle(resolveSessionAccent(entry.accentColor, postAccentColor))}>${entry.actorName ? `<small>${escapeSessionHtml(entry.actorName)}</small>` : ''}<p>${escapeSessionHtml(entry.text || '')}</p></div>`;
     }).join('');
     return DOMPurify.sanitize(`<div class="session-log-body">${participantHtml}${bgmHtml}${html}</div>`);
   }
@@ -298,14 +422,18 @@
     return /(\*{1,2}|_{1,2})\S[\s\S]*?\1/.test(content);
   }
 
-  async function loadDatabase() {
+  async function loadDatabase(force = false) {
     if (!supabase || !supabaseConfig.url || !supabaseConfig.hasPublishableKey) {
       dbStatus = 'missing'; dbError = 'Supabase 환경변수가 없습니다.'; return;
     }
-    try {
-      const [boardsResult, postsResult] = await Promise.all([
+    if (!force && dbStatus === 'connected' && Date.now() - databaseLoadedAt < 30000) return;
+    if (databaseLoadPromise) return databaseLoadPromise;
+    databaseLoadPromise = (async () => {
+      try {
+      const [boardsResult, postsResult, bgmResult] = await Promise.all([
         supabase.from('boards').select('slug, name, description, sort_order, is_public').eq('is_public', true).order('sort_order', { ascending: true }),
-        loadPostsQuery((columns) => supabase.from('posts').select(columns).eq('status', 'published').order('created_at', { ascending: false }).limit(100))
+        supabase.from('posts_public').select(publicPostListSelect).eq('status', 'published').order('created_at', { ascending: false }).limit(100),
+        supabase.from('posts_public').select('id, title, content, bgm_url, bgm_category').eq('status', 'published').eq('board_slug', 'bgm').order('created_at', { ascending: false }).limit(500)
       ]);
       if (boardsResult.error) throw new Error(`게시판 조회 실패: ${boardsResult.error.message}`);
       if (postsResult.error) throw new Error(`게시글 조회 실패: ${postsResult.error.message}`);
@@ -317,27 +445,52 @@
       const remotePosts = postsResult.data || [];
       const counts = remotePosts.reduce((map, post) => map.set(post.board_slug, (map.get(post.board_slug) || 0) + 1), new Map());
       categories = [{ name: '전체', slug: 'all', count: remotePosts.length, description: '모든 게시글 모아보기' }, ...visibleBoards.map((board) => ({ ...board, count: counts.get(board.slug) || 0 }))];
-      posts = await hydratePostAvatars(remotePosts.map((post) => formatPost(post, boardMap)));
+      posts = remotePosts.map((post) => formatPost(post, boardMap));
+      sessionMetadataLoaded = false;
+      sessionMetadataPromise = null;
+      if (currentRoute === 'board/sessions') await loadSessionPostMetadata();
       npcOptions = posts.filter((post) => post.boardSlug === 'npc');
-      bgmOptions = posts.filter((post) => post.boardSlug === 'bgm' && post.bgmUrl);
-      notices = posts.filter((post) => post.boardSlug === 'notices').slice(0, 3).map((post, index) => ({ tag: { patch: '패치노트', event: '이벤트', notice: '공지사항' }[post.postType] || '공지', title: post.title, meta: `${post.date} ${post.time}`, body: post.excerpt, tone: ['gold', 'blue', 'pink'][index] || 'gold' }));
-      dbStatus = 'connected'; dbError = '';
-    } catch (error) {
-      dbStatus = 'error'; dbError = error instanceof Error ? error.message : 'Supabase 연결에 실패했습니다.';
-    }
+      const loadedBgmOptions = bgmResult.error
+        ? posts.filter((post) => post.boardSlug === 'bgm' && post.bgmUrl)
+        : (bgmResult.data || []).map((post) => {
+          const embedded = readEmbeddedBgmData(post.content || '');
+          return {
+            id: post.id,
+            title: post.title,
+            bgmUrl: post.bgm_url || embedded.bgm_url || '',
+            bgmCategory: post.bgm_category || embedded.bgm_category || 'map'
+          };
+        }).filter((post) => post.bgmUrl);
+      bgmOptions = loadedBgmOptions;
+      notices = posts.filter((post) => post.boardSlug === 'notices').slice(0, 3).map((post, index) => ({ tag: { patch: '패치', event: '이벤트', notice: '공지' }[post.postType] || '공지', title: post.title, meta: `${post.date} ${post.time}`, body: post.excerpt, tone: ['gold', 'blue', 'pink'][index] || 'gold' }));
+        dbStatus = 'connected'; dbError = ''; databaseLoadedAt = Date.now();
+      } catch (error) {
+        dbStatus = 'error'; dbError = error instanceof Error ? error.message : 'Supabase 연결에 실패했습니다.';
+      } finally {
+        databaseLoadPromise = null;
+      }
+    })();
+    return databaseLoadPromise;
   }
 
   async function loadProfile(activeUser = user) {
     if (!supabase || !activeUser) return;
     profileLoading = true;
     try {
-      const profileQuery = supabase.from('profiles').select('id, nickname, role, avatar_url').eq('id', activeUser.id).maybeSingle();
-      const { data, error } = await Promise.race([
+      let profileQuery = supabase.from('profiles').select('id, nickname, role, avatar_url, accent_color').eq('id', activeUser.id).maybeSingle();
+      let profileResult = await Promise.race([
         profileQuery,
         new Promise((_, reject) => setTimeout(() => reject(new Error('프로필 조회 시간이 초과되었습니다.')), 10000))
       ]);
+      if (profileResult.error && /accent_color|column|schema cache/i.test(profileResult.error.message)) {
+        profileQuery = supabase.from('profiles').select('id, nickname, role, avatar_url').eq('id', activeUser.id).maybeSingle();
+        profileResult = await profileQuery;
+      }
+      const { data, error } = profileResult;
       profile = data || null;
+      profileAccentColor = getReadableAccentColor(data?.accent_color);
       isAdmin = !error && data?.role === 'admin';
+      accountForm = { newPassword: '', confirmPassword: '' };
       if (isAdmin) {
         adminProfileForm = { ...adminProfileForm, nickname: data?.nickname || '' };
         adminProfileImagePreview = data?.avatar_url || '';
@@ -357,11 +510,55 @@
       profile = null;
       isAdmin = false;
       await loadProfile(user);
-      await loadCharacterData();
+      const routeLoads = [];
+      if (routeNeedsCharacterData(currentRoute)) routeLoads.push(loadCharacterData());
+      if (currentRoute.startsWith('admin-character/')) routeLoads.push(loadAdminCharacterDetail(currentRoute.replace('admin-character/', '')));
+      if (currentRoute === 'shop' || currentRoute === 'admin/shop') routeLoads.push(loadShopData());
+      if (currentRoute === 'admin/shop' || currentRoute === 'admin/items') routeLoads.push(loadCatalogItems());
+      await Promise.all(routeLoads);
     } else {
       profile = null; profileLoading = false; isAdmin = false; character = null; inventory = []; cards = [];
+      characterLoadedKey = ''; characterLoadedAt = 0; characterRequestId += 1;
     }
     authReady = true;
+  }
+
+  async function loadSessionPostMetadata() {
+    if (!supabase || sessionMetadataLoaded) return;
+    if (sessionMetadataPromise) return sessionMetadataPromise;
+    sessionMetadataPromise = (async () => {
+      const result = await supabase
+        .from('posts_public')
+        .select('id, content')
+        .eq('status', 'published')
+        .eq('board_slug', 'sessions')
+        .order('created_at', { ascending: false })
+        .limit(100);
+      if (result.error) return;
+      const contentById = new Map((result.data || []).map((post) => [post.id, post.content || '']));
+      posts = posts.map((post) => {
+        if (post.boardSlug !== 'sessions' || !contentById.has(post.id)) return post;
+        const sessionData = readEmbeddedSessionData(contentById.get(post.id));
+        return {
+          ...post,
+          content: sessionData.content || '',
+          sessionEntries: sessionData.entries || [],
+          sessionParticipants: Array.isArray(sessionData.participants) ? sessionData.participants : [],
+          sessionBgms: Array.isArray(sessionData.bgms) ? sessionData.bgms : []
+        };
+      });
+      sessionMetadataLoaded = true;
+    })().finally(() => {
+      sessionMetadataPromise = null;
+    });
+    return sessionMetadataPromise;
+  }
+
+  function routeNeedsCharacterData(route) {
+    return route === 'mypage'
+      || route === 'admin'
+      || route === 'admin/combat-test'
+      || (isAdmin && (route.startsWith('write/sessions') || route.startsWith('edit/sessions')));
   }
 
   async function handleLogin() {
@@ -387,14 +584,25 @@
     session = null;
     user = null;
     profile = null;
+    accountForm = { newPassword: '', confirmPassword: '' };
     profileLoading = false;
     isAdmin = false;
     character = null;
+    characterLoadedKey = '';
+    characterLoadedAt = 0;
+    characterRequestId += 1;
     extraRecords = [];
     relationships = [];
     extraRecordCharacterId = null;
     inventory = [];
     cards = [];
+    shopListings = [];
+    adminShopListings = [];
+    shopBalance = null;
+    combatTestSelectedCharacterIds = [];
+    combatTestPlayers = [];
+    combatTestStarted = false;
+    combatTestTurn = 0;
     showNotice('로그아웃되었습니다.');
     navigateTo('#home');
     if (supabase) await supabase.auth.signOut();
@@ -410,7 +618,7 @@
     adminProfileSaving = true;
     let avatarUrl = profile?.avatar_url || null;
     if (adminProfileImageFile) {
-      try { avatarUrl = await imageFileToDataUrl(adminProfileImageFile); } catch (error) { adminProfileSaving = false; return showNotice(error instanceof Error ? error.message : '프로필 이미지를 처리하지 못했습니다.'); }
+      try { avatarUrl = await uploadProfileImage(adminProfileImageFile); } catch (error) { adminProfileSaving = false; return showNotice(error instanceof Error ? error.message : '프로필 이미지를 처리하지 못했습니다.'); }
     }
     const profileResult = await supabase.from('profiles').update({ nickname, avatar_url: avatarUrl }).eq('id', user.id);
     if (profileResult.error) { adminProfileSaving = false; return showNotice(`표시명 변경 실패: ${profileResult.error.message}`); }
@@ -425,10 +633,18 @@
     showNotice('관리자 계정 정보를 저장했습니다.');
   }
 
-  function toggleSound() { muted = !muted; if (audio) audio.muted = muted; }
-  function updateVolume(event) {
-    volume = Number(event.currentTarget.value); if (audio) audio.volume = volume;
-    if (volume > 0 && muted) { muted = false; if (audio) audio.muted = false; }
+  async function saveAccountPassword() {
+    if (!requireLogin() || !supabase) return;
+    const { newPassword, confirmPassword } = accountForm;
+    if (!newPassword) return showNotice('새 비밀번호를 입력해 주세요.');
+    if (newPassword.length < 8) return showNotice('비밀번호는 8자 이상 입력해 주세요.');
+    if (newPassword !== confirmPassword) return showNotice('새 비밀번호가 일치하지 않습니다.');
+    accountSettingsSaving = true;
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    accountSettingsSaving = false;
+    if (error) return showNotice(`비밀번호 변경 실패: ${error.message}`);
+    accountForm = { ...accountForm, newPassword: '', confirmPassword: '' };
+    showNotice('비밀번호를 변경했습니다.');
   }
 
   function syncRoute() {
@@ -441,7 +657,9 @@
       navigateTo(user ? '#mypage' : '#home');
       return;
     }
-    currentRoute = nextRoute; activeCategory = '전체'; searchTerm = ''; sortBy = 'latest'; noticeTypeFilter = 'all'; sessionPlayerFilter = ''; currentPage = 1; detailPost = null; detailHtml = '';
+    detailController?.abort();detailRequestId++;detailError='';detailLoading=false;
+    currentRoute = nextRoute; activeCategory = '전체'; searchTerm = ''; sortBy = 'latest'; noticeTypeFilter = 'all'; sessionPlayerFilter = ''; currentPage = 1; detailPost = null; detailHtml = ''; privatePostUnlocked = false; privatePostError = '';
+    ensureRouteComponent(nextRoute);
     if (nextRoute === 'admin') { adminSelectedCharacter = null; adminInventory = []; adminCards = []; }
     if (nextRoute.startsWith('write/')) { writeBoardSlug = nextRoute.replace('write/', '') || 'users'; editingPostId = null; editLoading = false; }
     if (!nextRoute.startsWith('edit/')) editLoading = false;
@@ -454,9 +672,12 @@
     }
     window.scrollTo({ top: 0, behavior: 'instant' });
     if (nextRoute.startsWith('post/')) loadPostDetail(nextRoute.replace('post/', ''));
+    if (nextRoute === 'board/sessions' && dbStatus === 'connected') loadSessionPostMetadata();
     if (nextRoute.startsWith('admin-character/')) loadAdminCharacterDetail(nextRoute.replace('admin-character/', ''));
-    if (nextRoute === 'mypage' || nextRoute === 'admin' || nextRoute === 'admin-mypage' || nextRoute === 'admin/items') loadCharacterData();
+    if (routeNeedsCharacterData(nextRoute)) loadCharacterData();
     if (nextRoute === 'admin/items') loadCatalogItems();
+    if (nextRoute === 'shop' || nextRoute === 'admin/shop') loadShopData();
+    if (nextRoute === 'admin/shop') loadCatalogItems();
   }
 
   function navigateTo(hash) {
@@ -466,26 +687,76 @@
       return;
     }
     window.location.hash = nextHash;
-    syncRoute();
+  }
+
+  function renderPostDetailHtml(post) {
+    return post.boardSlug === 'sessions' && (post.sessionEntries.length || post.sessionParticipants.length || post.sessionBgms.length)
+      ? renderSessionEntries(post.sessionEntries, post.sessionParticipants, post.sessionBgms, post.authorColor)
+      : post.boardSlug === 'bgm' ? renderBgmContent(post) : renderPostContent(post.content);
+  }
+
+  function renderPrivatePostLock() {
+    return `<section class="private-post-lock"><span class="private-post-lock-icon">▣</span><p class="eyebrow">PRIVATE RECORD</p><h2>비밀글입니다</h2><p>작성자와 운영자만 바로 볼 수 있습니다.<br />비밀번호를 입력하면 내용을 확인할 수 있어요.</p><form data-private-unlock-form><label>비밀번호<input data-private-password type="password" autocomplete="off" placeholder="비밀글 비밀번호" required /></label><button class="primary-btn" type="submit">내용 확인 <span>↗</span></button><small data-private-error></small></form></section>`;
+  }
+
+  async function unlockPrivatePost(password) {
+    if (!detailPost?.isPrivate) return;
+    const { data, error } = await supabase.rpc('open_private_post', { p_post_id: detailPost.id, p_password: String(password || '') });
+    if (error || !data) {
+      privatePostError = '비밀번호가 올바르지 않습니다.';
+      return false;
+    }
+    const privateData = Array.isArray(data) ? data[0] : data;
+    if (!privateData) {
+      privatePostError = '비밀번호가 올바르지 않습니다.';
+      return false;
+    }
+    const boardMap = new Map(categories.map((board) => [board.slug, board]));
+    detailPost = (await hydratePostAvatars([formatPost({ ...privateData, profiles: { nickname: detailPost.author, avatar_url: detailPost.avatarUrl, accent_color: detailPost.authorColor }, post_comments: [{ count: detailPost.comments }], post_likes: [{ count: detailPost.likes }] }, boardMap)]))[0];
+    if (detailPost.boardSlug === 'sessions') detailPost = await hydrateSessionAccentColors(detailPost);
+    privatePostError = '';
+    privatePostUnlocked = true;
+    detailHtml = renderPostDetailHtml(detailPost);
+    await loadEngagement(detailPost.id);
+    return true;
   }
 
   async function loadPostDetail(id) {
-    if (!supabase || !id) return;
-    const requestId = ++detailRequestId;
-    detailLoading = true;
-    detailComments = [];
-    commentText = '';
-    detailLiked = false;
-    const { data, error } = await loadPostsQuery((columns) => supabase.from('posts').select(columns).eq('id', id).maybeSingle());
-    if (requestId !== detailRequestId || currentRoute !== `post/${id}`) return;
-    if (error || !data) { detailLoading = false; return showNotice('게시글을 불러오지 못했습니다.'); }
-    const boardMap = new Map(categories.map((board) => [board.slug, board]));
-    detailPost = (await hydratePostAvatars([formatPost(data, boardMap)]))[0];
-    detailHtml = detailPost.boardSlug === 'sessions' && (detailPost.sessionEntries.length || detailPost.sessionParticipants.length || detailPost.sessionBgms.length) ? renderSessionEntries(detailPost.sessionEntries, detailPost.sessionParticipants, detailPost.sessionBgms) : detailPost.boardSlug === 'bgm' ? renderBgmContent(detailPost) : renderPostContent(detailPost.content);
-    detailLoading = false;
-    await loadEngagement(id);
-    if (requestId === detailRequestId && currentRoute === `post/${id}`) {
-      await supabase.rpc('increment_post_views', { post_id_input: id });
+    detailController?.abort();
+    const requestId=++detailRequestId;
+    const controller=new AbortController();detailController=controller;
+    const current=()=>requestId===detailRequestId && currentRoute===`post/${id}`;
+    detailLoading=true;detailError='';detailComments=[];commentText='';detailLiked=false;privatePostUnlocked=false;privatePostError='';
+    const timeout=setTimeout(()=>controller.abort(),20000);
+    try {
+      if(!supabase || !id)throw new Error('게시글 연결 설정을 확인해 주세요.');
+      const {data,error}=await supabase.from('posts_public').select(publicPostDetailSelect).eq('id',id).abortSignal(controller.signal).maybeSingle();
+      if(!current())return;
+      if(error)throw error;
+      if(!data)throw new Error('게시글이 없거나 열람할 수 없습니다.');
+      let detailData=data;
+      if(data.is_private && (isAdmin || user?.id===data.author_id)) {
+        const owner=await supabase.rpc('get_post_for_edit',{p_post_id:id}).abortSignal(controller.signal);
+        if(owner.error)throw owner.error;
+        if(owner.data)detailData={...data,...(Array.isArray(owner.data)?owner.data[0]:owner.data)};
+      }
+      let post=formatPost(detailData,new Map(categories.map(board=>[board.slug,board])));
+      // Optional profile styling must not prevent the post body from loading.
+      try { post=(await hydratePostAvatars([post],controller.signal))[0];if(post.boardSlug==='sessions')post=await hydrateSessionAccentColors(post,controller.signal); }
+      catch { /* Render with the author information already included in the post. */ }
+      if(!current())return;
+      const unlocked=!post.isPrivate || isAdmin || user?.id===post.authorId;
+      const html=unlocked ? renderPostDetailHtml(post) : renderPrivatePostLock();
+      if(!current())return;
+      detailPost=post;privatePostUnlocked=unlocked;detailHtml=html;
+    } catch(error) {
+      if(current()) { detailPost=null;detailHtml='';detailError=controller.signal.aborted?'게시글 요청 시간이 초과되었습니다. 다시 불러와 주세요.':error instanceof Error ? error.message : '게시글을 불러오지 못했습니다. 다시 시도해 주세요.'; }
+    } finally {
+      clearTimeout(timeout);if(current())detailLoading=false;
+    }
+    if(current() && detailPost) {
+      if(privatePostUnlocked)void loadEngagement(id).catch(()=>{});
+      void supabase.rpc('increment_post_views',{post_id_input:id}).then(()=>{}).catch(()=>{});
     }
   }
 
@@ -497,6 +768,7 @@
       const authorIds = [...new Set(rows.map((comment) => comment.author_id).filter(Boolean))];
       const profilesResult = authorIds.length ? await supabase.from('profiles').select('id, nickname, avatar_url').in('id', authorIds) : { data: [] };
       const authors = new Map((profilesResult.data || []).map((item) => [item.id, item]));
+      if(currentRoute!==`post/${postId}` || detailPost?.id!==postId)return;
       detailComments = rows.map((comment) => ({ ...comment, nickname: authors.get(comment.author_id)?.nickname || '모험가', avatarUrl: authors.get(comment.author_id)?.avatar_url || '' }));
     }
     if (!user) {
@@ -504,6 +776,7 @@
       return;
     }
     const likeResult = await supabase.from('post_likes').select('post_id').eq('post_id', postId).eq('user_id', user.id).maybeSingle();
+    if(currentRoute!==`post/${postId}` || detailPost?.id!==postId)return;
     if (!likeResult.error) detailLiked = Boolean(likeResult.data);
   }
 
@@ -554,6 +827,23 @@
   function createSessionParticipant() {
     const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
     return { id, participantType: 'character', participantId: '', participantName: '' };
+  }
+
+  function sessionParticipantActorValue(participant) {
+    if (!participant) return '';
+    const participantType = participant.participantType || 'custom';
+    const participantId = participantType === 'custom' ? participant.id || '' : participant.participantId || '';
+    return `${participantType}:${participantId}`;
+  }
+
+  function buildSessionActorParticipants(participants = []) {
+    const seen = new Set();
+    return participants.filter((participant) => {
+      const value = sessionParticipantActorValue(participant);
+      if (!value || value.endsWith(':') || (participant.participantType === 'custom' && !participant.participantName?.trim()) || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
   }
 
   function addSessionParticipant() {
@@ -635,9 +925,12 @@
 
   function setSessionActor(entry, value) {
     const [actorType, actorId = ''] = value.split(':');
+    const participant = actorType === 'custom' && actorId
+      ? sessionParticipants.find((item) => item.participantType === 'custom' && item.id === actorId)
+      : null;
     entry.actorType = actorType;
     entry.actorId = actorId;
-    entry.actorName = '';
+    entry.actorName = participant ? sessionParticipantName(participant) : '';
     sessionEntries = [...sessionEntries];
   }
 
@@ -667,7 +960,7 @@
 
   function sessionNpcName(id) {
     const npc = npcOptions.find((option) => option.id === id);
-    return npc?.npcName || npc?.title || '';
+    return plainNpcName(npc);
   }
 
   function sessionCharacterAvatar(id) {
@@ -689,6 +982,10 @@
   }
 
   function sessionActorName(entry) {
+    if (entry.actorType === 'custom' && entry.actorId) {
+      const participant = sessionParticipants.find((item) => item.participantType === 'custom' && item.id === entry.actorId);
+      if (participant) return sessionParticipantName(participant);
+    }
     if (entry.actorName) return entry.actorName;
     if (entry.actorType === 'character') return sessionCharacterName(entry.actorId) || '캐릭터';
     if (entry.actorType === 'npc') return sessionNpcName(entry.actorId) || 'NPC';
@@ -704,6 +1001,41 @@
     return '이름 없음';
   }
 
+  function dialogueSpeakerFromNarration(entry) {
+    if (entry.actorType === 'character' && entry.actorId) {
+      return { speakerType: 'character', speakerId: entry.actorId, speakerName: sessionCharacterName(entry.actorId), speakerImageUrl: sessionCharacterAvatar(entry.actorId) };
+    }
+    if (entry.actorType === 'npc' && entry.actorId) {
+      return { speakerType: 'npc', speakerId: entry.actorId, speakerName: sessionNpcName(entry.actorId), speakerImageUrl: sessionNpcAvatar(entry.actorId) };
+    }
+    if (entry.actorType === 'custom' && entry.actorName?.trim()) {
+      return { speakerType: 'custom', speakerId: '', speakerName: entry.actorName.trim(), speakerImageUrl: '' };
+    }
+    return { speakerType: 'anonymous', speakerId: '', speakerName: '???', speakerImageUrl: '' };
+  }
+
+  function splitNarrationQuotes(entry) {
+    const text = entry.text?.trim() || '';
+    // Match straight quotes and smart quotes as pairs so `“대사”` is
+    // converted in the same way as `"대사"`.
+    const quotePattern = /“([\s\S]*?)”|"([\s\S]*?)"/g;
+    const segments = [];
+    let foundQuote = false;
+    let cursor = 0;
+    let match;
+    while ((match = quotePattern.exec(text))) {
+      foundQuote = true;
+      const narrationBefore = text.slice(cursor, match.index).trim();
+      if (narrationBefore) segments.push({ type: 'narration', actorType: entry.actorType || 'none', actorId: entry.actorId || '', actorName: sessionActorName(entry), text: narrationBefore });
+      const dialogueText = (match[1] ?? match[2]).trim();
+      if (dialogueText) segments.push({ type: 'dialogue', ...dialogueSpeakerFromNarration(entry), text: dialogueText });
+      cursor = match.index + match[0].length;
+    }
+    const narrationAfter = text.slice(cursor).trim();
+    if (narrationAfter) segments.push({ type: 'narration', actorType: entry.actorType || 'none', actorId: entry.actorId || '', actorName: sessionActorName(entry), text: narrationAfter });
+    return foundQuote ? segments : null;
+  }
+
   function encodeSessionContent(entries, participants, bgms) {
     const data = btoa(unescape(encodeURIComponent(JSON.stringify({ version: 1, participants, bgms, entries }))));
     return `<!--OPEN_DOOR_SESSION:${data}-->`;
@@ -711,18 +1043,22 @@
 
   async function prepareSessionEntries() {
     const prepared = [];
+    const accentColor = getReadableAccentColor(profileAccentColor);
     for (const entry of sessionEntries) {
       if (entry.type === 'image') {
         let imageUrl = entry.imageUrl || '';
-        if (entry.imageFile) imageUrl = await imageFileToDataUrl(entry.imageFile);
+        if (entry.imageFile) imageUrl = await imageFileToDataUrl(entry.imageFile, { maxSide: 1600, quality: .8, maxBytes: 2_000_000 });
         if (!imageUrl) throw new Error('사진 항목에 이미지를 선택해 주세요.');
         prepared.push({ type: 'image', imageUrl, caption: entry.caption?.trim() || '' });
       } else if (entry.type === 'dialogue') {
         if (!entry.text?.trim()) throw new Error('대사 내용을 입력해 주세요.');
-        prepared.push({ type: 'dialogue', speakerType: entry.speakerType || 'anonymous', speakerId: entry.speakerId || '', speakerName: sessionSpeakerName(entry), speakerImageUrl: sessionSpeakerAvatar(entry), text: entry.text.trim() });
+        const speakerImageUrl = sessionSpeakerAvatar(entry);
+        prepared.push({ type: 'dialogue', speakerType: entry.speakerType || 'anonymous', speakerId: entry.speakerId || '', speakerName: sessionSpeakerName(entry), speakerImageUrl: speakerImageUrl && !speakerImageUrl.startsWith('data:') ? speakerImageUrl : '', accentColor, text: entry.text.trim() });
       } else {
         if (!entry.text?.trim()) throw new Error('지문 내용을 입력해 주세요.');
-        prepared.push({ type: 'narration', actorType: entry.actorType || 'none', actorId: entry.actorId || '', actorName: sessionActorName(entry), text: entry.text.trim() });
+        const splitEntries = splitNarrationQuotes(entry);
+        if (splitEntries) prepared.push(...splitEntries.map((splitEntry) => ({ ...splitEntry, accentColor })));
+        else prepared.push({ type: 'narration', actorType: entry.actorType || 'none', actorId: entry.actorId || '', actorName: sessionActorName(entry), accentColor, text: entry.text.trim() });
       }
     }
     return prepared;
@@ -741,27 +1077,52 @@
     if (npcImagePreview?.startsWith('blob:')) URL.revokeObjectURL(npcImagePreview);
     sessionEntries.forEach((entry) => entry.imageUrl?.startsWith('blob:') && URL.revokeObjectURL(entry.imageUrl));
     npcImagePreview = '';
+    npcOriginalImageUrl = '';
     sessionEntries = [];
     sessionParticipants = [];
     sessionBgmIds = [];
-    postForm = { title: '', content: '', postType: 'notice', npcName: '', npcAge: '', npcGender: '', npcHeight: '', npcRace: '', npcRole: '', npcTraits: '', npcAffiliation: '', npcPersonality: '', bgmCategory: 'map', bgmUrl: '', bgmFile: null, imageFile: null };
+    postForm = { title: '', content: '', postType: 'notice', isPrivate: false, privatePassword: '', npcName: '', npcAge: '', npcGender: '', npcHeight: '', npcRace: '', npcRole: '', npcTraits: '', npcAffiliation: '', npcPersonality: '', bgmCategory: 'map', bgmUrl: '', bgmFile: null, imageFile: null };
     editingPostId = null;
     editingPostAuthorId = null;
     editLoading = false;
     if (richEditor) richEditor.setMarkdown('', false);
   }
 
-  async function hydratePostAvatars(postList) {
+  async function hydratePostAvatars(postList,signal) {
     if (!supabase || !postList.length) return postList;
     const ids = [...new Set(postList.map((post) => post.authorId).filter(Boolean))];
     if (!ids.length) return postList;
-    const [{ data: profileRows }, { data: characterRows }] = await Promise.all([
-      supabase.from('profiles').select('id, avatar_url').in('id', ids),
-      supabase.from('characters').select('owner_id, avatar_url').in('owner_id', ids)
+    let [profileResult, characterResult] = await Promise.all([
+      supabase.from('profiles').select('id, avatar_url, accent_color').in('id', ids).abortSignal(signal),
+      supabase.from('characters').select('owner_id, avatar_url').in('owner_id', ids).abortSignal(signal)
     ]);
+    if (profileResult.error && /accent_color|column|schema cache/i.test(profileResult.error.message)) {
+      profileResult = await supabase.from('profiles').select('id, avatar_url').in('id', ids).abortSignal(signal);
+    }
+    const characterRows = characterResult.data || [];
+    const profileRows = profileResult.data || [];
     const profileAvatars = new Map((profileRows || []).map((item) => [item.id, item.avatar_url || '']));
+    const profileColors = new Map((profileRows || []).map((item) => [item.id, item.accent_color || '']));
     const characterAvatars = new Map((characterRows || []).map((item) => [item.owner_id, item.avatar_url || '']).filter(([, url]) => url));
-    return postList.map((post) => ({ ...post, avatarUrl: profileAvatars.get(post.authorId) || characterAvatars.get(post.authorId) || post.avatarUrl || '' }));
+    return postList.map((post) => ({ ...post, avatarUrl: profileAvatars.get(post.authorId) || characterAvatars.get(post.authorId) || post.avatarUrl || '', authorColor: getReadableAccentColor(profileColors.get(post.authorId) || post.authorColor) }));
+  }
+
+  async function hydrateSessionAccentColors(post,signal) {
+    if (!supabase || !post) return post;
+    const references = [...(post.sessionParticipants || []), ...(post.sessionEntries || []).map(entry => ({ participantType: entry.type === 'dialogue' ? entry.speakerType : entry.actorType, participantId: entry.type === 'dialogue' ? entry.speakerId : entry.actorId }))];
+    const characterIds = [...new Set(references.filter(item => item.participantType === 'character' && item.participantId).map(item => item.participantId))];
+    const npcIds = [...new Set(references.filter(item => item.participantType === 'npc' && item.participantId).map(item => item.participantId))];
+    let [characterResult, npcResult] = await Promise.all([
+      characterIds.length ? supabase.from('characters').select('id, owner_id, name, avatar_url').in('id', characterIds).abortSignal(signal) : { data: [] },
+      npcIds.length ? supabase.from('posts_public').select('id, title, npc_name, image_url').in('id', npcIds).abortSignal(signal) : { data: [] }
+    ]);
+    if (npcResult.error && npcIds.length) npcResult = await supabase.from('posts_public').select('id, title, image_url').in('id', npcIds).abortSignal(signal);
+    const characterRows = characterResult.error ? [] : characterResult.data || [];
+    const npcRows = npcResult.error ? [] : npcResult.data || [];
+    const ownerIds = [...new Set(characterRows.map(character => character.owner_id).filter(Boolean))];
+    const profileResult = ownerIds.length ? await supabase.from('profiles').select('id, accent_color').in('id', ownerIds).abortSignal(signal) : { data: [] };
+    const ownerColors = new Map((profileResult.error ? [] : profileResult.data || []).map(profile => [profile.id, getReadableAccentColor(profile.accent_color)]));
+    return mergeSessionReferences(post, characterRows, npcRows, ownerColors);
   }
 
   async function startEditing(post) {
@@ -775,18 +1136,27 @@
     if (routeBoardSlug) writeBoardSlug = routeBoardSlug;
     editingPostId = id;
     editLoading = true;
-    const { data, error } = await loadPostsQuery((columns) => supabase.from('posts').select(columns).eq('id', id).maybeSingle());
+    const [publicResult, editResult] = await Promise.all([
+      supabase.from('posts_public').select(publicPostDetailSelect).eq('id', id).maybeSingle(),
+      supabase.rpc('get_post_for_edit', { p_post_id: id })
+    ]);
+    const editData = Array.isArray(editResult.data) ? editResult.data[0] : editResult.data;
+    const data = publicResult.data && editData
+      ? { ...publicResult.data, ...editData, image_url: editData.image_url || publicResult.data.image_url }
+      : editData || publicResult.data;
+    const error = publicResult.error || editResult.error;
     if (requestId !== editRequestId || !currentRoute.startsWith('edit/')) return;
     if (error || !data) { editLoading = false; editingPostId = null; return showNotice('수정할 게시글을 불러오지 못했습니다.'); }
     const post = formatPost(data, new Map(categories.map((board) => [board.slug, board])));
     if (!user || post.authorId !== user.id) { editLoading = false; editingPostId = null; return navigateTo(`#post/${id}`); }
     writeBoardSlug = post.boardSlug;
     editingPostAuthorId = post.authorId;
-    postForm = { title: post.title, content: post.content, postType: post.postType || 'notice', npcName: post.npcName, npcAge: post.npcAge, npcGender: post.npcGender, npcHeight: post.npcHeight, npcRace: post.npcRace, npcRole: post.npcRole, npcTraits: post.npcTraits, npcAffiliation: post.npcAffiliation, npcPersonality: post.npcPersonality, bgmCategory: post.bgmCategory || 'map', bgmUrl: post.bgmUrl || '', bgmFile: null, imageFile: null };
+    postForm = { title: post.title, content: post.content, postType: post.postType || 'notice', isPrivate: post.isPrivate, privatePassword: post.privatePassword || '', npcName: post.npcName, npcAge: post.npcAge, npcGender: post.npcGender, npcHeight: post.npcHeight, npcRace: post.npcRace, npcRole: post.npcRole, npcTraits: post.npcTraits, npcAffiliation: post.npcAffiliation, npcPersonality: post.npcPersonality, bgmCategory: post.bgmCategory || 'map', bgmUrl: post.bgmUrl || '', bgmFile: null, imageFile: null };
     sessionParticipants = post.boardSlug === 'sessions' ? post.sessionParticipants.map((participant) => ({ ...participant, participantName: participant.participantName || participant.name || '', id: participant.id || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`) })) : [];
     sessionBgmIds = post.boardSlug === 'sessions' ? post.sessionBgms.map((bgm) => bgm.id).filter(Boolean) : [];
     sessionEntries = post.boardSlug === 'sessions' && post.sessionEntries.length ? post.sessionEntries.map((entry) => ({ ...entry, id: entry.id || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`), imageFile: null })) : post.boardSlug === 'sessions' && post.content ? [{ ...createSessionEntry('narration'), text: post.content }] : [];
-    npcImagePreview = post.imageUrl || '';
+    npcOriginalImageUrl = post.imageUrl || '';
+    npcImagePreview = npcOriginalImageUrl;
     if (richEditor) richEditor.setMarkdown(post.content || '', false);
     editLoading = false;
   }
@@ -818,18 +1188,38 @@
     return supabase.storage.from('bgm-audio').getPublicUrl(path).data.publicUrl;
   }
 
-  function setupRichEditor() {
+  async function setupRichEditor() {
     if (richEditor || !richEditorElement) return;
-    richEditor = new Editor({
+    if (!richEditorLoader) {
+      richEditorLoader = Promise.all([
+        import('@toast-ui/editor'),
+        import('@toast-ui/editor/dist/toastui-editor.css')
+      ]);
+    }
+    const [{ default: Editor }] = await richEditorLoader;
+    if (richEditor || !richEditorElement || (!isWritePage && !isEditPage) || writeBoardSlug !== 'users') return;
+    const mobileEditor = window.matchMedia('(max-width: 760px)').matches;
+    const editorOptions = {
       el: richEditorElement,
-      height: 'auto',
+      height: mobileEditor ? '100%' : '600px',
       initialEditType: 'wysiwyg',
       previewStyle: 'tab',
       autofocus: false,
       initialValue: postForm.content || '',
       placeholder: '내용을 자유롭게 작성해 주세요.',
+      usageStatistics: false,
       events: { change: handleRichEditorInput }
-    });
+    };
+    if (mobileEditor) {
+      editorOptions.toolbarItems = [
+        ['bold', 'italic'],
+        ['ul', 'ol'],
+        ['link', 'image']
+      ];
+      editorOptions.hideModeSwitch = true;
+    }
+    richEditor = new Editor(editorOptions);
+    richEditorElement.querySelector('[contenteditable="true"]')?.setAttribute('aria-label', '내용');
   }
 
   function handleRichEditorInput() {
@@ -853,13 +1243,145 @@
     richEditorSyncing = false;
   }
 
+  function getDecorationFingerprint() {
+    const visiblePosts = isBoardPage ? pagedBoardPosts : pagedFilteredPosts;
+    return JSON.stringify({
+      route: currentRoute,
+      section: profileSection,
+      writeBoard: writeBoardSlug,
+      user: user?.id || '',
+      componentReady: currentRoute === 'home' || Boolean(
+        (isBoardPage && BoardPage) || (isPostPage && PostDetailPage) || ((isWritePage || isEditPage) && WritePage)
+        || (isMyPage && MyPage) || (isAdminPage && AdminPage) || (isAdminMypage && AdminMypage)
+        || (isAdminCharacterPage && AdminCharacterPage) || (isAdminItemsPage && AdminItemsPage) || (isAdminMonstersPage && AdminMonstersPage)
+        || (isShopPage && ShopPage) || (isAdminShopPage && AdminShopPage)
+        || (isAdminCombatTestPage && AdminCombatTestPage) || (isMiniGamesPage && MiniGamesPage)
+        || (isDiceRollerPage && DiceRollerPage) || (isCombatPage && CombatPage)
+      ),
+      visiblePosts: visiblePosts.map((post) => [post.id, post.avatarUrl]),
+      detail: [detailPost?.id, detailPost?.avatarUrl, detailPost?.isPrivate, privatePostUnlocked],
+      comments: detailComments.map((comment) => [comment.id, comment.parent_id, comment.avatarUrl]),
+      profile: [adminProfileImagePreview, profileAccentColor],
+      character: [adminSelectedCharacter?.id, character?.id, character?.money, profileSection, selectedInventoryItem?.id],
+      relationships: relationships.map((item) => [item.id, item.relationship_name, item.npc_post_id, item.memo]),
+      sessionEntries: sessionEntries.map((entry) => entry.id),
+      editor: Boolean(richEditor)
+    });
+  }
+
   afterUpdate(() => {
     if ((isWritePage || isEditPage) && writeBoardSlug === 'users') setupRichEditor();
     else if (richEditor) { richEditor.destroy(); richEditor = null; richEditorElement = null; }
+    const nextFingerprint = getDecorationFingerprint();
+    if (nextFingerprint === decorationFingerprint) return;
+    decorationFingerprint = nextFingerprint;
     decorateCommunityUi();
   });
 
+  function reorderSessionEntry(sourceId, targetId, position = 'before') {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const sourceIndex = sessionEntries.findIndex((entry) => entry.id === sourceId);
+    const targetIndex = sessionEntries.findIndex((entry) => entry.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const nextEntries = [...sessionEntries];
+    const [movedEntry] = nextEntries.splice(sourceIndex, 1);
+    let insertIndex = targetIndex + (position === 'after' ? 1 : 0);
+    if (sourceIndex < insertIndex) insertIndex -= 1;
+    nextEntries.splice(insertIndex, 0, movedEntry);
+    sessionEntries = nextEntries;
+  }
+
+  function stopSessionDragAutoScroll() {
+    sessionDragPointerY = 0;
+    if (sessionDragScrollFrame) cancelAnimationFrame(sessionDragScrollFrame);
+    sessionDragScrollFrame = 0;
+  }
+
+  function sessionDragScrollLoop() {
+    if (!draggedSessionEntryId || !sessionDragPointerY) return stopSessionDragAutoScroll();
+    const edgeSize = 110;
+    const maxStep = 22;
+    const viewportHeight = window.innerHeight;
+    let step = 0;
+    if (sessionDragPointerY < edgeSize) step = -Math.ceil((edgeSize - sessionDragPointerY) / edgeSize * maxStep);
+    else if (sessionDragPointerY > viewportHeight - edgeSize) step = Math.ceil((sessionDragPointerY - (viewportHeight - edgeSize)) / edgeSize * maxStep);
+    if (step) window.scrollBy(0, step);
+    sessionDragScrollFrame = requestAnimationFrame(sessionDragScrollLoop);
+  }
+
+  function updateSessionDragAutoScroll(clientY) {
+    if (!draggedSessionEntryId) return;
+    sessionDragPointerY = clientY;
+    if (!sessionDragScrollFrame) sessionDragScrollFrame = requestAnimationFrame(sessionDragScrollLoop);
+  }
+
+  function setupSessionDragAutoScroll() {
+    if (sessionDragEventsReady) return;
+    sessionDragEventsReady = true;
+    window.addEventListener('dragover', (event) => updateSessionDragAutoScroll(event.clientY));
+    window.addEventListener('drop', stopSessionDragAutoScroll);
+  }
+
+  function decorateSessionDragAndDrop() {
+    setupSessionDragAutoScroll();
+    document.querySelectorAll('.session-entry').forEach((entryElement) => {
+      const handle = entryElement.querySelector('.session-entry-top');
+      if (!handle || handle.dataset.dragHandleReady) return;
+      const entryId = sessionEntries[Number(entryElement.querySelector('.session-entry-number')?.textContent || 0) - 1]?.id;
+      if (!entryId) return;
+      handle.dataset.dragHandleReady = 'true';
+      handle.draggable = true;
+      entryElement.dataset.sessionEntryId = entryId;
+      handle.addEventListener('dragstart', (event) => {
+        draggedSessionEntryId = entryId;
+        sessionDragPointerY = event.clientY;
+        entryElement.classList.add('session-entry-dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', entryId);
+      });
+      handle.addEventListener('dragend', () => {
+        draggedSessionEntryId = '';
+        stopSessionDragAutoScroll();
+        document.querySelectorAll('.session-entry-dragging, .session-entry-drag-over').forEach((element) => element.classList.remove('session-entry-dragging', 'session-entry-drag-over'));
+      });
+      entryElement.addEventListener('dragover', (event) => {
+        if (!draggedSessionEntryId || draggedSessionEntryId === entryId) return;
+        event.preventDefault();
+        updateSessionDragAutoScroll(event.clientY);
+        event.dataTransfer.dropEffect = 'move';
+        document.querySelectorAll('.session-entry-drag-over').forEach((element) => element.classList.remove('session-entry-drag-over'));
+        entryElement.classList.add('session-entry-drag-over');
+        entryElement.dataset.dropPosition = event.clientY > entryElement.getBoundingClientRect().top + entryElement.getBoundingClientRect().height / 2 ? 'after' : 'before';
+      });
+      entryElement.addEventListener('drop', (event) => {
+        event.preventDefault();
+        reorderSessionEntry(draggedSessionEntryId || event.dataTransfer.getData('text/plain'), entryId, entryElement.dataset.dropPosition || 'before');
+        draggedSessionEntryId = '';
+        stopSessionDragAutoScroll();
+        entryElement.classList.remove('session-entry-drag-over');
+        delete entryElement.dataset.dropPosition;
+      });
+    });
+  }
+
   function decorateCommunityUi() {
+    const privateUnlockForm = document.querySelector('[data-private-unlock-form]');
+    if (privateUnlockForm && !privateUnlockForm.dataset.ready) {
+      privateUnlockForm.dataset.ready = 'true';
+      privateUnlockForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const passwordInput = privateUnlockForm.querySelector('[data-private-password]');
+        const errorElement = privateUnlockForm.querySelector('[data-private-error]');
+        const submitButton = privateUnlockForm.querySelector('button[type="submit"]');
+        if (submitButton) submitButton.disabled = true;
+        const unlocked = await unlockPrivatePost(passwordInput?.value || '');
+        if (submitButton) submitButton.disabled = false;
+        if (!unlocked && errorElement) errorElement.textContent = privatePostError;
+      });
+    }
+    const privateContentLocked = Boolean(detailPost?.isPrivate && !privatePostUnlocked);
+    document.querySelector('.detail-actions')?.classList.toggle('private-content-locked', privateContentLocked);
+    document.querySelector('.comments-section')?.classList.toggle('private-content-locked', privateContentLocked);
     const editorHost = document.querySelector('.rich-editor-host');
     if (editorHost && !editorHost.dataset.popupPositioning) {
       editorHost.dataset.popupPositioning = 'true';
@@ -875,27 +1397,19 @@
     }
     const adminPreview = document.querySelector('.admin-profile-photo-preview');
     if (adminPreview) {
-      adminPreview.innerHTML = adminProfileImagePreview ? `<img src="${adminProfileImagePreview}" alt="프로필 미리보기" />` : '<span>사진을 선택해 주세요</span>';
+      adminPreview.innerHTML = adminProfileImagePreview ? `<img decoding="async" src="${adminProfileImagePreview}" alt="프로필 미리보기" />` : '<span>사진을 선택해 주세요</span>';
     }
     decorateAdminCharacterDetail();
+    decorateAdminAccountMoneyField();
+    decorateMoneyControls();
+    decorateProfileColorPicker();
+    decorateSessionDragAndDrop();
     document.querySelectorAll('.detail-footer').forEach((element) => element.remove());
-    const replaceAvatar = (element, url, alt = '') => {
-      if (!element || !url || element.dataset.avatarUrl === url) return;
-      const image = document.createElement('img');
-      image.className = 'avatar avatar-image'; image.src = url; image.alt = alt; image.dataset.avatarUrl = url;
-      element.replaceWith(image);
-    };
-    document.querySelectorAll('.post-row').forEach((row, index) => {
-      const post = (isBoardPage ? pagedBoardPosts : pagedFilteredPosts)[index];
-      replaceAvatar(row.querySelector('.avatar'), post?.avatarUrl, `${post?.author || ''} 프로필 사진`);
-    });
-    replaceAvatar(document.querySelector('.detail-author .avatar'), detailPost?.avatarUrl, `${detailPost?.author || ''} 프로필 사진`);
     detailComments.forEach((comment, index) => {
       const item = document.querySelectorAll('.comment-item')[index];
-      replaceAvatar(item?.querySelector('.avatar'), comment.avatarUrl, `${comment.nickname} 프로필 사진`);
       if (item && comment.parent_id) item.classList.add('comment-reply');
       if (item && user && !item.querySelector('[data-reply-button]')) {
-        const button = document.createElement('button'); button.className = 'subtle-btn'; button.type = 'button'; button.textContent = '답글'; button.dataset.replyButton = 'true';
+        const button = document.createElement('button'); button.className = 'comment-action-btn comment-reply-btn'; button.type = 'button'; button.textContent = '답글'; button.dataset.replyButton = 'true';
         button.addEventListener('click', () => setReplyTarget(comment));
         item.querySelector('.comment-author')?.append(button);
       }
@@ -906,11 +1420,36 @@
       const button = document.createElement('button'); button.className = 'subtle-btn'; button.type = 'button'; button.textContent = '게시글 수정'; button.dataset.editPost = 'true'; button.addEventListener('click', () => startEditing(detailPost));
       author.append(button);
     }
+    document.querySelectorAll('img').forEach((image) => {
+      if (!image.hasAttribute('loading')) image.loading = 'lazy';
+      if (!image.hasAttribute('decoding')) image.decoding = 'async';
+    });
+  }
+
+  function decorateProfileColorPicker() {
+    const fields = document.querySelector('.mypage .profile-fields');
+    if (!fields || fields.querySelector('[data-profile-color]')) return;
+    const label = document.createElement('label');
+    label.dataset.profileColor = 'true';
+    label.textContent = '나의 테마 색상';
+    const input = document.createElement('input');
+    input.className = 'accent-color-input';
+    input.type = 'color';
+    input.value = getReadableAccentColor(profileAccentColor);
+    input.setAttribute('aria-label', '나의 테마 색상 선택');
+    const applyColor = (value) => document.querySelector('.profile-photo-preview')?.style.setProperty('--profile-accent', getReadableAccentColor(value));
+    applyColor(input.value);
+    input.addEventListener('input', (event) => {
+      profileAccentColor = event.currentTarget.value;
+      applyColor(profileAccentColor);
+    });
+    input.addEventListener('change', (event) => saveProfileAccentColor(event.currentTarget.value));
+    label.append(input);
+    fields.append(label);
   }
 
   function positionEditorPopup() {
-    if (!window.matchMedia('(max-width: 640px)').matches) return;
-    return;
+    if (!window.matchMedia('(max-width: 760px)').matches) return;
     const host = document.querySelector('.rich-editor-host');
     const toolbar = host?.querySelector('.toastui-editor-defaultUI-toolbar');
     if (!host || !toolbar) return;
@@ -957,6 +1496,53 @@
       list.append(item);
     });
     section.append(list);
+  }
+
+  function decorateMoneyControls() {
+    const adminInput = document.querySelector('.character-detail-page .combat-grid label:nth-child(2) input');
+    if (adminInput) {
+      const label = adminInput.parentElement;
+      if (label?.firstChild?.nodeType === Node.TEXT_NODE) label.firstChild.nodeValue = '보유 돈 (G)';
+      adminInput.type = 'text';
+      adminInput.inputMode = 'numeric';
+      adminInput.pattern = '[0-9]*';
+      adminInput.min = '';
+      adminInput.max = '';
+      if (!adminInput.dataset.moneyReady) {
+        adminInput.dataset.moneyReady = 'true';
+        adminInput.addEventListener('input', updateAdminCharacterMoney);
+      }
+      adminInput.value = sanitizeMoneyInput(adminCharacterForm.money);
+    }
+
+    const playerInput = document.querySelector('.mypage .combat-grid label:nth-child(2) input');
+    if (playerInput) {
+      const label = playerInput.parentElement;
+      if (label?.firstChild?.nodeType === Node.TEXT_NODE) label.firstChild.nodeValue = '보유 돈 (G)';
+      playerInput.type = 'text';
+      playerInput.value = formatMoney(character?.money);
+    }
+  }
+
+  function decorateAdminAccountMoneyField() {
+    const form = [...document.querySelectorAll('.admin-layout form')].find((candidate) => candidate.querySelector('input[placeholder="플레이어 아이디"]'));
+    const fields = form?.querySelector('.field-grid');
+    if (!form || !fields) return;
+    let input = form.querySelector('[data-admin-starting-money]');
+    if (!input) {
+      const label = document.createElement('label');
+      label.textContent = '보유 돈 (G)';
+      input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.pattern = '[0-9]*';
+      input.placeholder = '0';
+      input.dataset.adminStartingMoney = 'true';
+      input.addEventListener('input', updateAdminFormMoney);
+      label.append(input);
+      fields.append(label);
+    }
+    input.value = sanitizeMoneyInput(adminForm.character.money);
   }
 
   function setReplyTarget(comment) {
@@ -1010,24 +1596,49 @@
     adminProfileImagePreview = URL.createObjectURL(file);
   }
 
-  async function imageFileToDataUrl(file) {
+  async function resizeImage(file, { maxSide = 1000, quality = .82, maxBytes = 2_000_000 } = {}) {
     const sourceUrl = URL.createObjectURL(file);
     try {
       const image = new Image();
       image.src = sourceUrl;
       await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; });
-      const maxSide = 1000;
       const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
       canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
       canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
-      if (dataUrl.length > 2_000_000) throw new Error('이미지를 조금 더 작은 파일로 올려 주세요.');
-      return dataUrl;
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (!blob) throw new Error('이미지를 변환하지 못했습니다.');
+      if (blob.size > maxBytes) throw new Error('이미지를 조금 더 작은 파일로 올려 주세요.');
+      return blob;
     } finally {
       URL.revokeObjectURL(sourceUrl);
     }
+  }
+
+  const resizeProfileImage = file => resizeImage(file, { maxSide: 480, quality: .76, maxBytes: 600_000 });
+
+  async function imageFileToDataUrl(file, options) {
+    const blob = await resizeImage(file, options);
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('이미지를 읽지 못했습니다.'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function uploadProfileImage(file) {
+    if (!file || !supabase || !user) return '';
+    const blob = await resizeProfileImage(file);
+    const fileId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    const path = `${user.id}/${fileId}.jpg`;
+    const { error } = await supabase.storage.from('profile-images').upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+    if (error) {
+      if (/bucket|not found|row-level security|policy/i.test(error.message)) throw new Error('프로필 이미지 저장소 설정이 필요합니다. 새 SQL 파일을 먼저 실행해 주세요.');
+      throw new Error(`프로필 이미지 업로드 실패: ${error.message}`);
+    }
+    return supabase.storage.from('profile-images').getPublicUrl(path).data.publicUrl;
   }
 
   async function createPost() {
@@ -1040,6 +1651,7 @@
     if (!isAdmin && boardSlug !== 'users' && !isEditingOwnPost) return showNotice('이 게시판은 관리자만 작성할 수 있어요.');
     if (boardSlug === 'npc' && (!postForm.npcName.trim() || !postForm.npcRole.trim())) return showNotice('NPC 이름과 역할/직업을 입력해 주세요.');
     if (boardSlug !== 'npc' && !postForm.title.trim()) return showNotice('제목을 입력해 주세요.');
+    if (postForm.isPrivate && postForm.privatePassword.trim().length < 4) return showNotice('비밀글 비밀번호는 4자 이상 입력해 주세요.');
     if (boardSlug === 'sessions' && !sessionEntries.length) return showNotice('+ 버튼으로 지문, 대사 또는 사진을 추가해 주세요.');
     if (boardSlug !== 'sessions' && boardSlug !== 'bgm' && !postForm.content.trim()) return showNotice('내용을 입력해 주세요.');
     if (boardSlug === 'bgm' && !postForm.bgmUrl.trim() && !postForm.bgmFile) return showNotice('BGM URL을 입력하거나 오디오 파일을 선택해 주세요.');
@@ -1068,35 +1680,51 @@
     if (postForm.imageFile) {
       if (postForm.imageFile.size > 5 * 1024 * 1024) { postSaving = false; return showNotice('이미지는 5MB 이하로 업로드해 주세요.'); }
       try {
-        imageUrl = await imageFileToDataUrl(postForm.imageFile);
+        imageUrl = await imageFileToDataUrl(postForm.imageFile, { maxSide: 640, quality: .76, maxBytes: 700_000 });
       } catch (error) {
         postSaving = false;
         return showNotice(error instanceof Error ? error.message : '이미지를 처리하지 못했습니다.');
       }
     }
-    const payload = { board_slug: boardSlug, title: postTitle, content: postContent, excerpt: (sessionExcerpt || postContent || postTitle).replace(/\s+/g, ' ').slice(0, 140), status: 'published', author_id: editingPostId ? editingPostAuthorId : user.id, image_url: boardSlug === 'npc' ? imageUrl || npcImagePreview || null : null, youtube_url: null, bgm_url: boardSlug === 'bgm' ? bgmUrl || null : null, bgm_category: boardSlug === 'bgm' ? postForm.bgmCategory : null, post_type: boardSlug === 'notices' ? postForm.postType : null, npc_name: boardSlug === 'npc' ? postForm.npcName.trim() : null, npc_age: boardSlug === 'npc' ? numberOrNull(postForm.npcAge) : null, npc_gender: boardSlug === 'npc' ? postForm.npcGender.trim() : null, npc_height: boardSlug === 'npc' ? numberOrNull(postForm.npcHeight) : null, npc_race: boardSlug === 'npc' ? postForm.npcRace.trim() : null, npc_role: boardSlug === 'npc' ? postForm.npcRole.trim() : null, npc_traits: boardSlug === 'npc' ? postForm.npcTraits.trim() : null, npc_affiliation: boardSlug === 'npc' ? postForm.npcAffiliation.trim() : null, npc_personality: boardSlug === 'npc' ? postForm.npcPersonality.trim() : null };
+    const privacyPayload = { is_private: Boolean(postForm.isPrivate), private_password: postForm.isPrivate ? postForm.privatePassword.trim() : null };
+    const npcImageUrl = imageUrl || npcImagePreview || npcOriginalImageUrl || null;
+    const payload = { board_slug: boardSlug, title: postTitle, content: postContent, excerpt: (sessionExcerpt || postContent || postTitle).replace(/\s+/g, ' ').slice(0, 140), status: 'published', author_id: editingPostId ? editingPostAuthorId : user.id, ...privacyPayload, image_url: boardSlug === 'npc' ? npcImageUrl : null, youtube_url: null, bgm_url: boardSlug === 'bgm' ? bgmUrl || null : null, bgm_category: boardSlug === 'bgm' ? postForm.bgmCategory : null, post_type: boardSlug === 'notices' ? postForm.postType : null, npc_name: boardSlug === 'npc' ? postForm.npcName.trim() : null, npc_age: boardSlug === 'npc' ? numberOrNull(postForm.npcAge) : null, npc_gender: boardSlug === 'npc' ? postForm.npcGender.trim() : null, npc_height: boardSlug === 'npc' ? numberOrNull(postForm.npcHeight) : null, npc_race: boardSlug === 'npc' ? postForm.npcRace.trim() : null, npc_role: boardSlug === 'npc' ? postForm.npcRole.trim() : null, npc_traits: boardSlug === 'npc' ? postForm.npcTraits.trim() : null, npc_affiliation: boardSlug === 'npc' ? postForm.npcAffiliation.trim() : null, npc_personality: boardSlug === 'npc' ? postForm.npcPersonality.trim() : null };
     let { data, error } = editingPostId
       ? await supabase.from('posts').update(payload).eq('id', editingPostId).select('id').single()
       : await supabase.from('posts').insert(payload).select('id').single();
+    if (error && /is_private|private_password/i.test(error.message)) {
+      postSaving = false;
+      return showNotice('비밀글 기능을 사용하려면 안내된 DB 쿼리를 먼저 실행해 주세요.');
+    }
     if (error && /column|schema cache|image_url|npc_|bgm_/i.test(error.message)) {
-      const fallbackData = { image_url: imageUrl || null, npc_name: postForm.npcName.trim(), npc_age: numberOrNull(postForm.npcAge), npc_gender: postForm.npcGender.trim(), npc_height: numberOrNull(postForm.npcHeight), npc_race: postForm.npcRace.trim(), npc_role: postForm.npcRole.trim(), npc_traits: postForm.npcTraits.trim(), npc_affiliation: postForm.npcAffiliation.trim(), npc_personality: postForm.npcPersonality.trim() };
+      const fallbackData = { image_url: boardSlug === 'npc' ? npcImageUrl : null, npc_name: postForm.npcName.trim(), npc_age: numberOrNull(postForm.npcAge), npc_gender: postForm.npcGender.trim(), npc_height: numberOrNull(postForm.npcHeight), npc_race: postForm.npcRace.trim(), npc_role: postForm.npcRole.trim(), npc_traits: postForm.npcTraits.trim(), npc_affiliation: postForm.npcAffiliation.trim(), npc_personality: postForm.npcPersonality.trim() };
       const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(fallbackData))));
       const bgmFallback = btoa(unescape(encodeURIComponent(JSON.stringify({ bgm_url: bgmUrl || null, bgm_category: postForm.bgmCategory }))));
       const legacyContent = boardSlug === 'sessions' ? postContent : boardSlug === 'bgm' ? `<!--OPEN_DOOR_BGM:${bgmFallback}-->${postContent}` : `<!--OPEN_DOOR_NPC:${encoded}-->${postContent}`;
-      const legacyPayload = { board_slug: boardSlug, title: postTitle, content: legacyContent, excerpt: (sessionExcerpt || postContent || postTitle).replace(/\s+/g, ' ').slice(0, 140), status: 'published', author_id: editingPostId ? editingPostAuthorId : user.id };
+      const legacyPayload = { board_slug: boardSlug, title: postTitle, content: legacyContent, excerpt: (sessionExcerpt || postContent || postTitle).replace(/\s+/g, ' ').slice(0, 140), status: 'published', author_id: editingPostId ? editingPostAuthorId : user.id, ...privacyPayload };
       ({ data, error } = editingPostId
         ? await supabase.from('posts').update(legacyPayload).eq('id', editingPostId).select('id').single()
         : await supabase.from('posts').insert(legacyPayload).select('id').single());
     }
     postSaving = false;
     if (error) return showNotice(`글 저장 실패: ${error.message}`);
+    if (postForm.isPrivate && data?.id) {
+      const privacyCheck = await supabase.from('posts_public').select('id, is_private').eq('id', data.id).maybeSingle();
+      if (privacyCheck.error) {
+        return showNotice(`비밀글 저장 확인 실패: ${privacyCheck.error.message}`);
+      }
+      if (!privacyCheck.data?.is_private) {
+        return showNotice('저장 결과가 비밀글로 확인되지 않았습니다. DB 컬럼과 저장 정책을 확인해 주세요.');
+      }
+    }
     if (npcImagePreview) URL.revokeObjectURL(npcImagePreview);
     sessionEntries.forEach((entry) => entry.imageUrl?.startsWith('blob:') && URL.revokeObjectURL(entry.imageUrl));
     npcImagePreview = '';
+    npcOriginalImageUrl = '';
     sessionEntries = [];
     sessionParticipants = [];
     sessionBgmIds = [];
-    postForm = { title: '', content: '', postType: 'notice', npcName: '', npcAge: '', npcGender: '', npcHeight: '', npcRace: '', npcRole: '', npcTraits: '', npcAffiliation: '', npcPersonality: '', bgmCategory: 'map', bgmUrl: '', bgmFile: null, imageFile: null }; editingPostId = null; await loadDatabase(); showNotice(wasEditing ? '게시글을 수정했습니다.' : '게시글을 등록했습니다.'); navigateTo(`#post/${data.id}`);
+    postForm = { title: '', content: '', postType: 'notice', isPrivate: false, privatePassword: '', npcName: '', npcAge: '', npcGender: '', npcHeight: '', npcRace: '', npcRole: '', npcTraits: '', npcAffiliation: '', npcPersonality: '', bgmCategory: 'map', bgmUrl: '', bgmFile: null, imageFile: null }; editingPostId = null; await loadDatabase(true); showNotice(wasEditing ? '게시글을 수정했습니다.' : '게시글을 등록했습니다.'); navigateTo(`#post/${data.id}`);
   }
 
   async function deletePost(post) {
@@ -1105,7 +1733,7 @@
     if (!isAdmin) deleteQuery.eq('author_id', user.id);
     const { error } = await deleteQuery;
     if (error) return showNotice(`게시글 삭제 실패: ${error.message}`);
-    await loadDatabase(); showNotice('게시글을 삭제했습니다.'); navigateTo('#home');
+    await loadDatabase(true); showNotice('게시글을 삭제했습니다.'); navigateTo('#home');
   }
 
   async function addComment() {
@@ -1155,28 +1783,132 @@
         item_id: item.item_id || catalog.id,
         item_name: catalog.name,
         item_effect: catalog.item_effect,
+        item_description: catalog.item_description || item.item_description || '',
         grade: catalog.grade,
         item_type: catalog.item_type,
-        icon_url: catalog.icon_url || item.icon_url || ''
+        equipment_slot: catalog.equipment_slot || item.equipment_slot || '',
+        icon_url: catalog.icon_url || item.icon_url || '',
+        is_equipped: Boolean(item.is_equipped),
+        chest_reward_item_ids: catalog.chest_reward_item_ids || [],
+        chest_reward_count: catalog.chest_reward_count || 1
       };
     }
-    return item;
+    return { ...item, is_equipped: Boolean(item.is_equipped) };
   }
   function getInventoryIcon(item) {
     const resolved = resolveInventoryItem(item);
     if (resolved?.icon_url) return resolved.icon_url;
     if (resolved?.item_type === '소비' || /물약|포션|bottle|potion/i.test(resolved?.item_name || '')) return '/icons/round-potion.png';
-    return { 유물: '✦', 장비: '⚔', 소비: '✚', 기타: '◆' }[resolved?.item_type] || '◆';
+    return { 유물: '✦', 장비: '⚔', 소비: '✚', 상자: '▣', 기타: '◆' }[resolved?.item_type] || '◆';
+  }
+  function isEquippableItem(item) { return ['장비', '유물'].includes(resolveInventoryItem(item)?.item_type); }
+  function getEquippedInventory(items = []) { return items.map((item) => resolveInventoryItem(item)).filter((item) => isEquippableItem(item) && Boolean(item.is_equipped)); }
+  async function toggleInventoryEquipment(item, characterId = character?.id) {
+    if (!requireLogin() || !supabase || !characterId || !item?.id || !isEquippableItem(item) || equipmentSaving) return;
+    const resolvedItem = resolveInventoryItem(item);
+    const isEquipped = !Boolean(item.is_equipped);
+    if (isEquipped && resolvedItem.item_type === '장비' && !resolvedItem.equipment_slot) return showNotice('장비 부위가 지정되지 않았습니다. 관리자 아이템 관리에서 부위를 먼저 설정해 주세요.');
+    equipmentSaving = true;
+    const { error } = await supabase.rpc('set_inventory_item_equipped', { p_inventory_item_id: item.id, p_equipped: isEquipped });
+    equipmentSaving = false;
+    if (error) {
+      if (/set_inventory_item_equipped|equipment_slot|is_equipped|function|column|schema cache/i.test(error.message)) return showNotice('부위별 장착을 사용하려면 supabase/queries/add_equipment_slots.sql을 먼저 실행해 주세요.');
+      return showNotice(`장착 상태 변경 실패: ${error.message}`);
+    }
+    const { itemsResult } = await loadCharacterCollections(characterId);
+    if (!itemsResult.error) {
+      const refreshedItems = itemsResult.data || [];
+      if (character?.id === characterId) inventory = refreshedItems;
+      if (adminSelectedCharacter?.id === characterId) adminInventory = refreshedItems;
+      if (selectedInventoryItem) selectedInventoryItem = refreshedItems.find((inventoryItem) => inventoryItem.id === selectedInventoryItem.id) || null;
+    }
+    showNotice(isEquipped ? `'${resolvedItem.item_name}'을(를) 장착했습니다.` : `'${resolvedItem.item_name}'의 장착을 해제했습니다.`);
+  }
+  function isChestItem(item) { return item?.item_type === '상자'; }
+  function buildRouletteSequence(source, count) {
+    if (!source.length || count < 1) return [];
+    const sequence = [];
+    while (sequence.length < count) {
+      const block = [...source].sort(() => Math.random() - 0.5);
+      if (sequence.length && block.length > 1 && block[0].id === sequence[sequence.length - 1].id) {
+        [block[0], block[1]] = [block[1], block[0]];
+      }
+      sequence.push(...block);
+      // A rare repeated tile breaks the predictable 1-2-1-2 rhythm with two candidates.
+      if (source.length > 1 && Math.random() < 0.28 && sequence.length < count) {
+        sequence.push(source[Math.floor(Math.random() * source.length)]);
+      }
+    }
+    return sequence.slice(0, count);
+  }
+  async function openInventoryChest() {
+    if (!requireLogin() || !supabase || !character?.id || !selectedInventoryItem?.id || !isChestItem(selectedInventoryItem)) return;
+    openingChest = true;
+    chestOpeningDone = false;
+    chestOpeningReady = false;
+    chestOpeningRewards = [];
+    chestOpeningTiles = [];
+    rouletteTrackStyle = '';
+    const openingStartedAt = Date.now();
+    const rewardIds = selectedInventoryItem.chest_reward_item_ids || [];
+    const openingPromise = supabase.rpc('open_inventory_chest', { p_inventory_item_id: selectedInventoryItem.id, p_character_id: character.id });
+    const previewResult = await supabase.from('items').select('id, name, item_effect, item_description, grade, item_type, icon_url').in('id', rewardIds);
+    const previewItems = previewResult.data || [];
+    if (previewItems.length) {
+      // Keep cycling through the configured candidates while the server resolves the draw.
+      const loopTiles = buildRouletteSequence(previewItems, 18);
+      chestOpeningTiles = [...loopTiles, ...loopTiles];
+      chestOpeningReady = true;
+      await tick();
+    }
+    const { data, error } = await openingPromise;
+    if (error) {
+      const remainingErrorTime = Math.max(0, 6000 - (Date.now() - openingStartedAt));
+      if (remainingErrorTime) await new Promise((resolve) => setTimeout(resolve, remainingErrorTime));
+      openingChest = false;
+      return showNotice(`상자를 열지 못했습니다: ${error.message}`);
+    }
+    const rewards = data || [];
+    const tileSource = previewItems.length ? previewItems : rewards;
+    const targetReward = rewards[Math.floor(Math.random() * rewards.length)] || tileSource[0];
+    const targetIndex = 72;
+    chestOpeningTiles = tileSource.length
+      ? [...buildRouletteSequence(tileSource, targetIndex), targetReward, ...buildRouletteSequence(tileSource, 10)]
+      : [];
+    chestOpeningRewards = rewards;
+    chestOpeningReady = true;
+    await tick();
+    const rouletteTile = document.querySelector('.roulette-tile');
+    const rouletteWindow = document.querySelector('.roulette-window');
+    if (rouletteTile && rouletteWindow) {
+      const tileWidth = rouletteTile.getBoundingClientRect().width;
+      const stopPosition = rouletteWindow.getBoundingClientRect().width / 2 - (targetIndex * tileWidth) - tileWidth / 2;
+      rouletteTrackStyle = `--roulette-stop: ${stopPosition}px`;
+    }
+    const remainingSpinTime = Math.max(0, 6800 - (Date.now() - openingStartedAt));
+    if (remainingSpinTime) await new Promise((resolve) => setTimeout(resolve, remainingSpinTime));
+    await loadCharacterData(true);
+    selectedInventoryItem = null;
+    chestOpeningDone = true;
+  }
+  function closeChestOpening() {
+    openingChest = false;
+    chestOpeningDone = false;
+    chestOpeningReady = false;
+    const names = chestOpeningRewards.map((item) => item.item_name).join(', ');
+    chestOpeningRewards = [];
+    chestOpeningTiles = [];
+    showNotice(names ? `상자를 열어 ${names}을(를) 획득했습니다.` : '상자에서 획득한 아이템이 없습니다.');
   }
   function isImageIcon(value) { return typeof value === 'string' && /^(\/|data:image\/|https?:\/\/)/.test(value); }
   function resetItemForm() {
-    itemForm = { id: '', name: '', item_effect: '', grade: '일반', item_type: '기타', icon_url: '' };
+    itemForm = { id: '', name: '', item_effect: '', item_description: '', grade: '일반', item_type: '기타', equipment_slot: '', icon_url: '', chest_reward_item_ids: [], chest_reward_count: 1, combat_effects:null, relic_effects:null };
     itemFormImageFile = null;
     if (itemFormImagePreview?.startsWith('blob:')) URL.revokeObjectURL(itemFormImagePreview);
     itemFormImagePreview = '';
   }
   function editCatalogItem(item) {
-    itemForm = { id: item.id, name: item.name, item_effect: item.item_effect || '', grade: item.grade, item_type: item.item_type, icon_url: item.icon_url || '' };
+    itemForm = { id: item.id, name: item.name, item_effect: item.item_effect || '', item_description: item.item_description || '', grade: item.grade, item_type: item.item_type, equipment_slot: item.equipment_slot || '', icon_url: item.icon_url || '', chest_reward_item_ids: item.chest_reward_item_ids || [], chest_reward_count: item.chest_reward_count || 1, combat_effects:item.combat_effects ?? null, relic_effects:item.relic_effects ?? null };
     itemFormImageFile = null;
     if (itemFormImagePreview?.startsWith('blob:')) URL.revokeObjectURL(itemFormImagePreview);
     itemFormImagePreview = item.icon_url || '';
@@ -1190,43 +1922,174 @@
     if (itemFormImagePreview?.startsWith('blob:')) URL.revokeObjectURL(itemFormImagePreview);
     itemFormImagePreview = URL.createObjectURL(file);
   }
-  async function loadCatalogItems() {
-    if (!supabase || !isAdmin) return;
-    catalogLoading = true;
-    let result = await supabase.from('items').select('id, name, item_effect, grade, item_type, icon_url, created_at').order('name');
-    if (result.error && /items|relation|schema cache/i.test(result.error.message)) {
-      catalogItems = [];
-      catalogLoading = false;
+  function normalizeShopListing(row) {
+    const item = Array.isArray(row?.items) ? row.items[0] : row?.items;
+    return {
+      ...row,
+      item: item || { id: row?.item_id, name: '삭제된 아이템', item_effect: '', item_description: '', grade: '기타', item_type: '기타', icon_url: '' },
+      item_name: item?.name || '삭제된 아이템',
+      item_effect: item?.item_effect || '',
+      item_description: item?.item_description || '',
+      grade: item?.grade || '기타',
+      item_type: item?.item_type || '기타',
+      price_g: Number(row?.price_g) || 0,
+      personal_limit: row?.personal_limit ?? null,
+      total_limit: row?.total_limit ?? null,
+      sold_count: Number(row?.sold_count) || 0,
+      personal_purchased: Number(row?.personal_purchased) || 0,
+      is_active: Boolean(row?.is_active)
+    };
+  }
+  async function loadShopData() {
+    if (!supabase || !user) {
+      shopListings = [];
+      adminShopListings = [];
+      shopBalance = null;
+      shopLoading = false;
+      adminShopLoading = false;
       return;
     }
+    shopLoading = true;
+    adminShopLoading = isAdminShopPage;
+    shopError = '';
+    const result = await supabase.from('shop_listings').select('id, item_id, price_g, personal_limit, total_limit, sold_count, is_active, created_at, updated_at, items(id, name, item_effect, item_description, grade, item_type, icon_url)').order('created_at', { ascending: false });
     if (result.error) {
-      catalogLoading = false;
-      return showNotice(`아이템 목록 조회 실패: ${result.error.message}`);
+      shopListings = [];
+      adminShopListings = [];
+      shopError = /shop_listings|relation|schema cache|column/i.test(result.error.message)
+        ? '상점 테이블이 아직 준비되지 않았습니다. 제공된 create_shop.sql을 Supabase SQL Editor에서 실행해 주세요.'
+        : result.error.message;
+      shopLoading = false;
+      adminShopLoading = false;
+      return;
     }
-    catalogItems = result.data || [];
-    catalogLoading = false;
+    const balanceResult = await supabase.from('characters').select('id, money').eq('owner_id', user.id).maybeSingle();
+    shopBalance = balanceResult.error ? null : (balanceResult.data?.money ?? 0);
+    let rows = (result.data || []).map(normalizeShopListing);
+    if (balanceResult.data?.id && rows.length) {
+      const purchaseResult = await supabase.from('shop_purchases').select('listing_id, quantity').eq('character_id', balanceResult.data.id);
+      const purchasedByListing = (purchaseResult.data || []).reduce((counts, purchase) => ({ ...counts, [purchase.listing_id]: Number(purchase.quantity) || 0 }), {});
+      rows = rows.map((listing) => ({ ...listing, personal_purchased: purchasedByListing[listing.id] || 0 }));
+    }
+    shopListings = rows;
+    adminShopListings = isAdmin ? rows : [];
+    shopLoading = false;
+    adminShopLoading = false;
+  }
+  function setShopPurchaseQuantity(listingId, value) {
+    shopPurchaseQuantities = { ...shopPurchaseQuantities, [listingId]: Math.max(1, Math.floor(Number(value) || 1)) };
+  }
+  async function purchaseShopItem(listingId, quantity = 1) {
+    if (!requireLogin('상점에서 구매하려면 로그인해 주세요.') || !supabase || shopPurchaseSaving) return;
+    const safeQuantity = Math.max(1, Math.floor(Number(quantity) || 1));
+    shopPurchaseSaving = true;
+    const result = await supabase.rpc('purchase_shop_item', { p_listing_id: listingId, p_quantity: safeQuantity });
+    shopPurchaseSaving = false;
+    if (result.error) return showNotice(`구매 실패: ${result.error.message}`);
+    const purchase = result.data || {};
+    shopBalance = purchase.remaining_balance ?? shopBalance;
+    await loadCharacterData(true);
+    await loadShopData();
+    showNotice(`${purchase.item_name || '상품'} ${purchase.quantity || safeQuantity}개를 구매했습니다.`);
+  }
+  function resetShopForm() {
+    shopForm = { id: '', item_id: '', price_g: 0, personal_limit: '', total_limit: '', sold_count: 0, is_active: false };
+  }
+  function editShopListing(listing) {
+    shopForm = { id: listing.id, item_id: listing.item_id, price_g: listing.price_g, personal_limit: listing.personal_limit ?? '', total_limit: listing.total_limit ?? '', sold_count: listing.sold_count || 0, is_active: listing.is_active };
+  }
+  async function saveShopListing() {
+    if (!isAdmin || !supabase) return;
+    if (!shopForm.item_id) return showNotice('판매할 아이템을 선택해 주세요.');
+    const payload = {
+      item_id: shopForm.item_id,
+      price_g: Math.max(0, Math.floor(Number(shopForm.price_g) || 0)),
+      personal_limit: shopForm.personal_limit === '' || shopForm.personal_limit === null ? null : Math.max(1, Math.floor(Number(shopForm.personal_limit) || 1)),
+      total_limit: shopForm.total_limit === '' || shopForm.total_limit === null ? null : Math.max(1, Math.floor(Number(shopForm.total_limit) || 1)),
+      is_active: Boolean(shopForm.is_active)
+    };
+    shopAdminSaving = true;
+    const result = shopForm.id
+      ? await supabase.from('shop_listings').update(payload).eq('id', shopForm.id).select().single()
+      : await supabase.from('shop_listings').insert(payload).select().single();
+    shopAdminSaving = false;
+    if (result.error) return showNotice(`상점 상품 저장 실패: ${result.error.message}`);
+    resetShopForm();
+    await loadShopData();
+    showNotice('상점 상품을 저장했습니다.');
+  }
+  async function deleteShopListing(listing) {
+    if (!isAdmin || !supabase || !listing?.id || !confirm(`'${listing.item_name}' 상품을 상점에서 삭제할까요?`)) return;
+    const result = await supabase.from('shop_listings').delete().eq('id', listing.id);
+    if (result.error) return showNotice(`상점 상품 삭제 실패: ${result.error.message}`);
+    if (shopForm.id === listing.id) resetShopForm();
+    await loadShopData();
+    showNotice('상점 상품을 삭제했습니다.');
+  }
+  async function loadCatalogItems(force = false) {
+    if (!supabase || !isAdmin) return;
+    if (!force && catalogLoadedAt && Date.now() - catalogLoadedAt < 60000) return;
+    if (catalogLoadPromise) return catalogLoadPromise;
+    catalogLoading = true;
+    catalogLoadPromise = (async () => {
+      let result = await supabase.from('items').select('*').order('name');
+      if (result.error && /equipment_slot|chest_reward|column|schema cache/i.test(result.error.message)) {
+        result = await supabase.from('items').select('id, name, item_effect, grade, item_type, icon_url, created_at').order('name');
+      }
+      if (result.error && /items|relation|schema cache/i.test(result.error.message)) {
+        catalogItems = [];
+        return;
+      }
+      if (result.error) return showNotice(`아이템 목록 조회 실패: ${result.error.message}`);
+      catalogItems = result.data || [];
+      catalogLoadedAt = Date.now();
+    })().finally(() => {
+      catalogLoading = false;
+      catalogLoadPromise = null;
+    });
+    return catalogLoadPromise;
   }
   async function saveCatalogItem() {
     if (!isAdmin || !supabase) return;
     const name = itemForm.name.trim();
     if (!name) return showNotice('아이템 이름을 입력해 주세요.');
+    if (itemForm.item_type === '장비' && !itemForm.equipment_slot) return showNotice('장비 부위를 선택해 주세요.');
+    const itemRule = itemForm.item_type === '소비' ? itemForm.combat_effects : null;
+    const relicRule = itemForm.item_type === '유물' ? itemForm.relic_effects : null;
+    let hasRelicSchema;
+    try { hasRelicSchema = await prepareRelicSave(supabase,relicRule); }
+    catch(problem) { return showNotice(problem.message || '유물 효과를 확인하지 못했습니다.'); }
+    let hasItemCombatSchema;
+    try { hasItemCombatSchema = await prepareConsumableSave(supabase,itemRule); }
+    catch(problem) { return showNotice(problem.message || '아이템 효과 설정을 확인하지 못했습니다.'); }
     itemSaving = true;
     let iconUrl = itemForm.icon_url || null;
     if (itemFormImageFile) {
-      try { iconUrl = await imageFileToDataUrl(itemFormImageFile); } catch (error) {
+      try { iconUrl = await imageFileToDataUrl(itemFormImageFile, { maxSide: 256, quality: .76, maxBytes: 250_000 }); } catch (error) {
         itemSaving = false;
         return showNotice(error instanceof Error ? error.message : '아이템 이미지를 처리하지 못했습니다.');
       }
     }
-    const payload = { name, item_effect: itemForm.item_effect.trim(), grade: itemForm.grade, item_type: itemForm.item_type, icon_url: iconUrl };
-    const result = itemForm.id
+    const payload = { name, item_effect: itemForm.item_effect.trim(), item_description: itemForm.item_description.trim(), grade: itemForm.grade, item_type: itemForm.item_type, equipment_slot: itemForm.item_type === '장비' ? itemForm.equipment_slot : null, icon_url: iconUrl, chest_reward_item_ids: itemForm.item_type === '상자' ? itemForm.chest_reward_item_ids : [], chest_reward_count: itemForm.item_type === '상자' ? Math.max(1, Number(itemForm.chest_reward_count) || 1) : 1, ...(hasItemCombatSchema ? {combat_effects:itemRule} : {}), ...(hasRelicSchema ? {relic_effects:relicRule} : {}) };
+    let result = itemForm.id
       ? await supabase.from('items').update(payload).eq('id', itemForm.id).select().single()
       : await supabase.from('items').insert(payload).select().single();
+    if (result.error && /equipment_slot/i.test(result.error.message)) {
+      itemSaving = false;
+      return showNotice('장비 부위를 저장하려면 supabase/queries/add_equipment_slots.sql을 먼저 실행해 주세요.');
+    }
+    if (result.error && /item_description|column|schema cache/i.test(result.error.message)) {
+      const { item_description, ...legacyPayload } = payload;
+      result = itemForm.id
+        ? await supabase.from('items').update(legacyPayload).eq('id', itemForm.id).select().single()
+        : await supabase.from('items').insert(legacyPayload).select().single();
+      if (!result.error && item_description) showNotice('아이템은 저장했지만 설명 컬럼이 없어 설명은 저장되지 않았습니다. 제공된 SQL을 먼저 실행해 주세요.');
+    }
     itemSaving = false;
     if (result.error) return showNotice(`아이템 저장 실패: ${result.error.message}`);
     const wasEdit = Boolean(itemForm.id);
     resetItemForm();
-    await loadCatalogItems();
+    await loadCatalogItems(true);
     showNotice(wasEdit ? '아이템을 수정했습니다.' : '아이템을 등록했습니다.');
   }
   async function deleteCatalogItem(item) {
@@ -1234,7 +2097,7 @@
     const { error } = await supabase.from('items').delete().eq('id', item.id);
     if (error) return showNotice(`아이템 삭제 실패: ${error.message}`);
     if (itemForm.id === item.id) resetItemForm();
-    await loadCatalogItems();
+    await loadCatalogItems(true);
     showNotice('아이템을 삭제했습니다.');
   }
   function addCatalogItemToInventory(catalogItem) {
@@ -1249,10 +2112,13 @@
       item_id: catalogItem.id,
       item_name: catalogItem.name,
       item_effect: catalogItem.item_effect || '',
+      item_description: catalogItem.item_description || '',
       grade: catalogItem.grade,
       item_type: catalogItem.item_type,
+      equipment_slot: catalogItem.equipment_slot || '',
       icon_url: catalogItem.icon_url || '',
-      quantity: 1
+      quantity: 1,
+      is_equipped: false
     }];
     inventorySearchTerm = '';
     showNotice(`'${catalogItem.name}'을(를) 인벤토리에 추가했습니다.`);
@@ -1261,77 +2127,138 @@
   async function handleAdminInventoryImage(event, index) {
     showNotice('아이템 정보는 아이템 관리 페이지에서 수정해 주세요.');
   }
-  function newInventoryItem() { inventory = [...inventory, { item_name: '', item_effect: '', quantity: 1, grade: '일반', item_type: '기타' }]; }
-  function newCard() { cards = [...cards, { card_name: '', card_effect: '', quantity: 1, energy: 0, grade: '기본' }]; }
+  function newInventoryItem() { inventory = [...inventory, { item_name: '', item_effect: '', item_description: '', quantity: 1, grade: '일반', item_type: '기타', is_equipped: false }]; }
+  function newCard() { cards = [...cards, { card_name: '', card_effect: '', card_exhaust_effect: '', card_drop_effect: '', card_drop_count: 0, card_retain: false, card_innate: false, card_ethereal: false, card_type: '스킬', card_target: '자신', quantity: 1, energy: 0, grade: '기본' }]; }
   function removeInventory(index) { inventory = inventory.filter((_, itemIndex) => itemIndex !== index); }
   function removeCard(index) { cards = cards.filter((_, cardIndex) => cardIndex !== index); }
   function setCharacterForm(data) {
     characterForm = { name: data?.name || '', roleName: data?.role_name || '', roleTraits: data?.role_traits || '', age: data?.age ?? '', height: data?.height ?? '', weight: data?.weight ?? '' };
   }
 
+  function sanitizeMoneyInput(value) {
+    return String(value ?? '').replace(/[^0-9]/g, '');
+  }
+
+  function normalizeMoney(value) {
+    const parsed = Number(sanitizeMoneyInput(value));
+    return Number.isFinite(parsed) ? Math.min(Math.floor(parsed), 2147483647) : 0;
+  }
+
+  function formatMoney(value) {
+    return `${new Intl.NumberFormat('ko-KR').format(normalizeMoney(value))} G`;
+  }
+
+  function updateAdminFormMoney(event) {
+    const money = sanitizeMoneyInput(event.currentTarget.value);
+    event.currentTarget.value = money;
+    adminForm = { ...adminForm, character: { ...adminForm.character, money } };
+  }
+
+  function updateAdminCharacterMoney(event) {
+    const money = sanitizeMoneyInput(event.currentTarget.value);
+    event.currentTarget.value = money;
+    adminCharacterForm = { ...adminCharacterForm, money };
+  }
+
   function selectAdminCharacter(data) {
     adminSelectedCharacter = data;
-    adminCharacterForm = { name: data?.name || '', roleName: data?.role_name || data?.class_name || '', roleTraits: data?.role_traits || data?.content || '', age: data?.age ?? '', height: data?.height ?? '', weight: data?.weight ?? '', money: data?.money ?? 0, level: data?.level ?? 1, hp: data?.hp ?? 0, maxHp: data?.max_hp ?? 0, mp: data?.mp ?? 0, maxMp: data?.max_mp ?? 0, attack: data?.attack ?? 0, defense: data?.defense ?? 0, combatNotes: data?.combat_notes || '' };
+    adminCharacterForm = { name: data?.name || '', roleName: data?.role_name || data?.class_name || '', roleTraits: data?.role_traits || data?.content || '', age: data?.age ?? '', height: data?.height ?? '', weight: data?.weight ?? '', money: String(data?.money ?? 0), level: data?.level ?? 1, hp: data?.hp ?? 0, maxHp: data?.max_hp ?? 0, mp: data?.mp ?? 0, maxMp: data?.max_mp ?? 0, attack: data?.attack ?? 0, defense: data?.defense ?? 0, combatNotes: data?.combat_notes || '', personalEnergy: {...defaultPersonalEnergy(),...(data?.personal_energy || {})} };
     navigateTo(`#admin-character/${data.id}`);
   }
 
   function selectAdminCharacterState(data) {
     adminSelectedCharacter = data;
-    adminCharacterForm = { name: data?.name || '', roleName: data?.role_name || data?.class_name || '', roleTraits: data?.role_traits || data?.content || '', age: data?.age ?? '', height: data?.height ?? '', weight: data?.weight ?? '', money: data?.money ?? 0, level: data?.level ?? 1, hp: data?.hp ?? 0, maxHp: data?.max_hp ?? 0, mp: data?.mp ?? 0, maxMp: data?.max_mp ?? 0, attack: data?.attack ?? 0, defense: data?.defense ?? 0, combatNotes: data?.combat_notes || '' };
+    adminCharacterForm = { name: data?.name || '', roleName: data?.role_name || data?.class_name || '', roleTraits: data?.role_traits || data?.content || '', age: data?.age ?? '', height: data?.height ?? '', weight: data?.weight ?? '', money: String(data?.money ?? 0), level: data?.level ?? 1, hp: data?.hp ?? 0, maxHp: data?.max_hp ?? 0, mp: data?.mp ?? 0, maxMp: data?.max_mp ?? 0, attack: data?.attack ?? 0, defense: data?.defense ?? 0, combatNotes: data?.combat_notes || '', personalEnergy: {...defaultPersonalEnergy(),...(data?.personal_energy || {})} };
   }
 
   async function loadAdminCharacterDetail(id) {
     if (!isAdmin || !supabase || !id) return;
     adminDetailLoading = true;
+    // Read the revision before inventory rows so any concurrent consumption makes a later save stale.
     const characterResult = await supabase.from('characters').select('*').eq('id', id).maybeSingle();
+    const [collections] = await Promise.all([
+      loadCharacterCollections(id),
+      loadCatalogItems(),
+      loadCharacterRecords(id)
+    ]);
     if (characterResult.error || !characterResult.data) { adminDetailLoading = false; return showNotice('캐릭터 상세 정보를 불러오지 못했습니다.'); }
     selectAdminCharacterState(characterResult.data);
-    const { itemsResult, cardsResult } = await loadCharacterCollections(id);
+    const { itemsResult, cardsResult } = collections;
     if (itemsResult.error || cardsResult.error) { adminDetailLoading = false; return showNotice('인벤토리 또는 카드 정보를 불러오지 못했습니다.'); }
     adminInventory = (itemsResult.data || []).map((item) => resolveInventoryItem(item));
+    adminInventoryBaseline = JSON.stringify(adminInventory);
+    adminInventoryVersion = characterResult.data.inventory_version ?? null;
     adminCards = cardsResult.data || [];
-    await loadCatalogItems();
-    await loadCharacterRecords(id);
     adminDetailLoading = false;
   }
 
   async function saveAdminCharacter() {
-    if (!isAdmin || !supabase || !adminSelectedCharacter) return;
+    if (!isAdmin || !supabase || !adminSelectedCharacter || adminCharacterSaving) return;
     if (!adminCharacterForm.name.trim() || !adminCharacterForm.roleName.trim()) return showNotice('캐릭터 이름과 역할명을 입력해 주세요.');
     adminCharacterSaving = true;
-    const payload = { name: adminCharacterForm.name.trim(), class_name: adminCharacterForm.roleName.trim(), content: adminCharacterForm.roleTraits.trim(), role_name: adminCharacterForm.roleName.trim(), role_traits: adminCharacterForm.roleTraits.trim(), age: numberOrNull(adminCharacterForm.age), height: numberOrNull(adminCharacterForm.height), weight: numberOrNull(adminCharacterForm.weight), money: Math.max(0, Number(adminCharacterForm.money) || 0), level: Math.max(1, Number(adminCharacterForm.level) || 1), hp: Math.max(0, Number(adminCharacterForm.hp) || 0), max_hp: Math.max(0, Number(adminCharacterForm.maxHp) || 0), mp: Math.max(0, Number(adminCharacterForm.mp) || 0), max_mp: Math.max(0, Number(adminCharacterForm.maxMp) || 0), attack: Math.max(0, Number(adminCharacterForm.attack) || 0), defense: Math.max(0, Number(adminCharacterForm.defense) || 0), combat_notes: adminCharacterForm.combatNotes.trim() };
-    let characterResult = await supabase.from('characters').update(payload).eq('id', adminSelectedCharacter.id).select().single();
-    if (characterResult.error && /money|level|max_hp|combat_notes|extra_info|column|schema cache/i.test(characterResult.error.message)) {
-      const { money, level, hp, max_hp, mp, max_mp, attack, defense, combat_notes, ...legacyPayload } = payload;
-      characterResult = await supabase.from('characters').update(legacyPayload).eq('id', adminSelectedCharacter.id).select().single();
+    try {
+      const characterId = adminSelectedCharacter.id;
+      const cards = buildAdminCardRows(adminCards, characterId);
+      const hasPresetSchema = await prepareCardSave(supabase, cards);
+      const energyConfig = {...defaultPersonalEnergy(),...adminCharacterForm.personalEnergy};
+      const hasResourceSchema = await prepareResourceSave(supabase, energyConfig, cards);
+      const inventoryChanged = JSON.stringify(adminInventory) !== adminInventoryBaseline;
+      const expectedInventoryVersion = adminInventoryVersion;
+      const payload = { name: adminCharacterForm.name.trim(), class_name: adminCharacterForm.roleName.trim(), content: adminCharacterForm.roleTraits.trim(), role_name: adminCharacterForm.roleName.trim(), role_traits: adminCharacterForm.roleTraits.trim(), age: numberOrNull(adminCharacterForm.age), height: numberOrNull(adminCharacterForm.height), weight: numberOrNull(adminCharacterForm.weight), money: normalizeMoney(adminCharacterForm.money), level: Math.max(1, Number(adminCharacterForm.level) || 1), hp: Math.max(0, Number(adminCharacterForm.hp) || 0), max_hp: Math.max(0, Number(adminCharacterForm.maxHp) || 0), mp: Math.max(0, Number(adminCharacterForm.mp) || 0), max_mp: Math.max(0, Number(adminCharacterForm.maxMp) || 0), attack: Math.max(0, Number(adminCharacterForm.attack) || 0), defense: Math.max(0, Number(adminCharacterForm.defense) || 0), combat_notes: adminCharacterForm.combatNotes.trim(), ...(hasResourceSchema ? {personal_energy:energyConfig.name.trim() ? {...energyConfig,name:energyConfig.name.trim()} : {}} : {}) };
+      let characterResult = await supabase.from('characters').update(payload).eq('id', adminSelectedCharacter.id).select().single();
+      if (characterResult.error && /money/i.test(characterResult.error.message)) {
+        adminCharacterSaving = false;
+        return showNotice('보유 돈을 저장하려면 characters.money 컬럼 SQL을 먼저 실행해 주세요.');
+      }
+      if (characterResult.error && /level|max_hp|combat_notes|extra_info|column|schema cache/i.test(characterResult.error.message)) {
+        const { money, level, hp, max_hp, mp, max_mp, attack, defense, combat_notes, ...legacyPayload } = payload;
+        characterResult = await supabase.from('characters').update(legacyPayload).eq('id', adminSelectedCharacter.id).select().single();
+      }
+      if (characterResult.error) return showNotice(`캐릭터 수정 실패: ${characterResult.error.message}`);
+      selectAdminCharacterState({ ...adminSelectedCharacter, ...characterResult.data });
+      const usesSeparateCardEffects = cards.some((card) => card.card_exhaust_effect || card.card_drop_effect || card.card_drop_count > 0 || card.card_retain || card.card_innate || card.card_ethereal || card.card_type !== '스킬' || card.card_target !== '자신');
+      if (usesSeparateCardEffects) {
+        const cardEffectsSchema = await supabase.from('character_cards').select('card_exhaust_effect, card_drop_effect, card_drop_count, card_retain, card_innate, card_ethereal, card_type, card_target').limit(0);
+        if (cardEffectsSchema.error) {
+          adminCharacterSaving = false;
+          return showNotice('카드 키워드·타입·대상 컬럼을 저장하려면 새 SQL을 먼저 실행해 주세요.');
+        }
+      }
+      if (hasPresetSchema) {
+        const { data: savedCards, error: saveError } = await supabase.rpc('combat_save_character_cards', { p_character_id: characterId, p_cards: cards });
+        if (saveError) return showNotice(`카드 저장 실패: ${saveError.code === 'PGRST202' ? 'add_card_combat_presets.sql 전체를 적용해 주세요.' : saveError.message}`);
+        adminCards = (savedCards || []).map(normalizeOwnedCard);
+      }
+      const deleteItems = hasResourceSchema ? {error:null} : await supabase.from('inventory_items').delete().eq('character_id', characterId);
+      const deleteCards = hasPresetSchema ? { error: null } : await supabase.from('character_cards').delete().eq('character_id', characterId);
+      if (deleteItems.error || deleteCards.error) { adminCharacterSaving = false; return showNotice('인벤토리 또는 카드 정리 중 오류가 발생했습니다.'); }
+      const items = adminInventory
+        .filter((item) => item.item_id || item.item_name?.trim())
+        .map((item) => ({
+          ...(hasResourceSchema && item.id ? {id:item.id} : {}),
+          character_id: characterId,
+          item_id: item.item_id || null,
+          item_name: item.item_name?.trim() || '',
+          item_effect: item.item_effect?.trim() || '',
+          item_description: item.item_description?.trim() || '',
+          quantity: Math.max(1, Number(item.quantity) || 1),
+          is_equipped: isEquippableItem(item) ? Boolean(item.is_equipped) : false,
+          grade: item.grade,
+          item_type: item.item_type,
+          icon_url: item.icon_url || null
+        }));
+      const itemSaveError = hasResourceSchema ? (inventoryChanged ? (await supabase.rpc('combat_save_inventory',{p_character_id:characterId,p_expected_version:expectedInventoryVersion,p_items:items})).error : null) : await saveInventoryWithIconFallback(items);
+      if (itemSaveError) { adminCharacterSaving = false; return showNotice(`인벤토리 저장 실패: ${itemSaveError.message}`); }
+      const cardSaveError = hasPresetSchema ? null : await saveCardsWithEnergyFallback(cards.map(({ id, combat_rule, ...card }) => card));
+      if (cardSaveError) { adminCharacterSaving = false; return showNotice(`카드 저장 실패: ${cardSaveError.message}`); }
+      await loadCharacterData(true);
+      await loadAdminCharacterDetail(characterId);
+      showNotice('캐릭터 정보를 수정했습니다.');
+    } catch (error) {
+      showNotice(error.message || '캐릭터 정보를 저장하지 못했습니다. 다시 시도해 주세요.');
+    } finally {
+      adminCharacterSaving = false;
     }
-    adminCharacterSaving = false;
-    if (characterResult.error) return showNotice(`캐릭터 수정 실패: ${characterResult.error.message}`);
-    selectAdminCharacterState({ ...adminSelectedCharacter, ...characterResult.data });
-    const characterId = adminSelectedCharacter.id;
-    const deleteItems = await supabase.from('inventory_items').delete().eq('character_id', characterId);
-    const deleteCards = await supabase.from('character_cards').delete().eq('character_id', characterId);
-    if (deleteItems.error || deleteCards.error) { adminCharacterSaving = false; return showNotice('인벤토리 또는 카드 정리 중 오류가 발생했습니다.'); }
-    const items = adminInventory
-      .filter((item) => item.item_id || item.item_name?.trim())
-      .map((item) => ({
-        character_id: characterId,
-        item_id: item.item_id || null,
-        item_name: item.item_name?.trim() || '',
-        item_effect: item.item_effect?.trim() || '',
-        quantity: Math.max(1, Number(item.quantity) || 1),
-        grade: item.grade,
-        item_type: item.item_type,
-        icon_url: item.icon_url || null
-      }));
-    const cards = adminCards.filter((card) => card.card_name?.trim()).map((card) => ({ character_id: characterId, card_name: card.card_name.trim(), card_effect: card.card_effect?.trim() || '', quantity: Math.max(1, Number(card.quantity) || 1), energy: Math.max(0, Number(card.energy) || 0), grade: card.grade }));
-    const itemSaveError = await saveInventoryWithIconFallback(items);
-    if (itemSaveError) { adminCharacterSaving = false; return showNotice(`인벤토리 저장 실패: ${itemSaveError.message}`); }
-    const cardSaveError = await saveCardsWithEnergyFallback(cards);
-    if (cardSaveError) { adminCharacterSaving = false; return showNotice(`카드 저장 실패: ${cardSaveError.message}`); }
-    await loadCharacterData();
-    await loadAdminCharacterDetail(characterId);
-    showNotice('캐릭터 정보를 수정했습니다.');
   }
 
   async function deleteAdminCharacter() {
@@ -1342,7 +2269,7 @@
     adminInventory = [];
     adminCards = [];
     navigateTo('#admin');
-    await loadCharacterData();
+    await loadCharacterData(true);
     showNotice('캐릭터를 삭제했습니다.');
   }
 
@@ -1356,39 +2283,230 @@
     showNotice('아래 검색창에서 아이템을 검색해 인벤토리에 추가해 주세요.');
   }
   function removeAdminInventory(index) { adminInventory = adminInventory.filter((_, itemIndex) => itemIndex !== index); }
-  function newAdminCard() { adminCards = [...adminCards, { card_name: '', card_effect: '', quantity: 1, energy: 0, grade: '기본' }]; }
+  function newAdminCard() { adminCards = [...adminCards, { card_name: '', card_effect: '', card_exhaust_effect: '', card_drop_effect: '', card_drop_count: 0, card_retain: false, card_innate: false, card_ethereal: false, card_type: '스킬', card_target: '자신', quantity: 1, energy: 0, grade: '기본' }]; }
   function removeAdminCard(index) { adminCards = adminCards.filter((_, cardIndex) => cardIndex !== index); }
 
   async function loadCharacterCollections(characterId) {
-    let itemsResult = await supabase.from('inventory_items').select('id, item_id, item_name, item_effect, quantity, grade, item_type, icon_url, items(id, name, item_effect, grade, item_type, icon_url)').eq('character_id', characterId).order('created_at');
-    if (itemsResult.error && /items|item_id|relation|schema cache/i.test(itemsResult.error.message)) {
-      itemsResult = await supabase.from('inventory_items').select('id, item_name, item_effect, quantity, grade, item_type, icon_url').eq('character_id', characterId).order('created_at');
-    }
-    if (itemsResult.error) {
-      const legacyItemsResult = await supabase.from('inventory_items').select('id, item_name, item_effect, quantity, grade, item_type').eq('character_id', characterId).order('created_at');
-      if (!legacyItemsResult.error) itemsResult = { ...legacyItemsResult, data: (legacyItemsResult.data || []).map((item) => ({ ...item, icon_url: '', item_id: null })) };
-    }
-    if (!itemsResult.error) {
-      itemsResult = { ...itemsResult, data: (itemsResult.data || []).map((item) => resolveInventoryItem(item)) };
-    }
-    let cardsResult = await supabase.from('character_cards').select('id, card_name, card_effect, quantity, energy, grade').eq('character_id', characterId).order('created_at');
-    // Older databases do not have the optional energy column yet.
-    if (cardsResult.error) {
-      const legacyCardsResult = await supabase.from('character_cards').select('id, card_name, card_effect, quantity, grade').eq('character_id', characterId).order('created_at');
-      if (!legacyCardsResult.error) cardsResult = { ...legacyCardsResult, data: (legacyCardsResult.data || []).map((card) => ({ ...card, energy: 0 })) };
-    }
+    const loadItems = async () => {
+      let result = await supabase.from('inventory_items').select('id, item_id, item_name, item_effect, item_description, quantity, grade, item_type, icon_url, is_equipped, items(id, name, item_effect, item_description, grade, item_type, equipment_slot, icon_url, chest_reward_item_ids, chest_reward_count)').eq('character_id', characterId).order('created_at');
+      if (result.error && /items|item_id|relation|schema cache/i.test(result.error.message)) {
+        result = await supabase.from('inventory_items').select('id, item_name, item_effect, quantity, grade, item_type, icon_url, is_equipped').eq('character_id', characterId).order('created_at');
+      }
+      if (result.error) {
+        const legacyResult = await supabase.from('inventory_items').select('id, item_name, item_effect, quantity, grade, item_type').eq('character_id', characterId).order('created_at');
+        if (!legacyResult.error) result = { ...legacyResult, data: (legacyResult.data || []).map((item) => ({ ...item, icon_url: '', item_id: null })) };
+      }
+      return result.error ? result : { ...result, data: (result.data || []).map((item) => resolveInventoryItem(item)) };
+    };
+
+    const loadCards = async () => {
+      const result = await supabase.from('character_cards').select('*').eq('character_id', characterId).order('created_at');
+      return result.error ? result : { ...result, data: (result.data || []).map(normalizeOwnedCard) };
+    };
+
+    const [itemsResult, cardsResult] = await Promise.all([loadItems(), loadCards()]);
     return { itemsResult, cardsResult };
+  }
+
+  function toggleCombatTestCharacter(characterId) {
+    if (combatTestStarted || !characterId) return;
+    combatTestSelectedCharacterIds = combatTestSelectedCharacterIds.includes(characterId)
+      ? combatTestSelectedCharacterIds.filter((id) => id !== characterId)
+      : [...combatTestSelectedCharacterIds, characterId];
+  }
+
+  function shuffleCombatTestCards(cards = []) {
+    const shuffled = [...cards];
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const targetIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[targetIndex]] = [shuffled[targetIndex], shuffled[index]];
+    }
+    return shuffled;
+  }
+
+  function createCombatTestDrawPile(deckCards = []) {
+    return shuffleCombatTestCards(deckCards.map((card) => ({
+      ...card,
+      drawId: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
+    })));
+  }
+
+  function drawCombatTestCards(player, count = 1) {
+    let drawPile = [...(player.drawPile || [])];
+    const exhaustedIds = new Set((player.exhaustedCards || []).map((card) => card.instanceId));
+    const retainedIds = new Set((player.hand || []).filter((card) => card.card_retain).map((card) => card.instanceId));
+    const availableDeckCards = (player.deckCards || []).filter((card) => !exhaustedIds.has(card.instanceId) && !retainedIds.has(card.instanceId));
+    const drawnCards = [];
+    while (drawnCards.length < count) {
+      if (!drawPile.length) {
+        if (!availableDeckCards.length) break;
+        drawPile = createCombatTestDrawPile(availableDeckCards);
+      }
+      const drawCount = Math.min(count - drawnCards.length, drawPile.length);
+      drawnCards.push(...drawPile.splice(0, drawCount));
+    }
+    return { ...player, hand: [...(player.hand || []), ...drawnCards], drawPile };
+  }
+
+  function drawCombatTestHand(player, count = 5) {
+    return drawCombatTestCards(player, count);
+  }
+
+  function drawCombatTestOpeningHand(player, count = 5) {
+    const exhaustedIds = new Set((player.exhaustedCards || []).map((card) => card.instanceId));
+    const availableDeckCards = (player.deckCards || []).filter((card) => !exhaustedIds.has(card.instanceId));
+    const innateCards = shuffleCombatTestCards(availableDeckCards.filter((card) => card.card_innate));
+    const openingHand = innateCards.slice(0, count);
+    const openingIds = new Set(openingHand.map((card) => card.instanceId));
+    const remainingCards = availableDeckCards.filter((card) => !openingIds.has(card.instanceId));
+    const playerWithOpeningHand = { ...player, hand: [], drawPile: createCombatTestDrawPile(remainingCards) };
+    return { ...playerWithOpeningHand, hand: createCombatTestDrawPile(openingHand) };
+  }
+
+  async function startCombatTest() {
+    if (!isAdmin || !supabase || combatTestLoading) return;
+    if (!combatTestSelectedCharacterIds.length) return showNotice('전투 테스트에 참여할 플레이어를 선택해 주세요.');
+    combatTestLoading = true;
+    let cardsResult = await supabase.from('character_cards').select('*').in('character_id', combatTestSelectedCharacterIds).order('created_at');
+    if (cardsResult.error && /energy|card_exhaust_effect|card_drop_effect|card_drop_count|card_retain|card_innate|card_ethereal|card_type|card_target|column|schema cache/i.test(cardsResult.error.message)) {
+      cardsResult = await supabase.from('character_cards').select('id, character_id, card_name, card_effect, card_exhaust_effect, card_drop_effect, card_drop_count, card_retain, card_innate, card_ethereal, card_type, card_target, quantity, grade').in('character_id', combatTestSelectedCharacterIds).order('created_at');
+    }
+    if (cardsResult.error && /card_exhaust_effect|card_drop_effect|card_drop_count|card_retain|card_innate|card_ethereal|card_type|card_target|column|schema cache/i.test(cardsResult.error.message)) {
+      cardsResult = await supabase.from('character_cards').select('id, character_id, card_name, card_effect, quantity, grade').in('character_id', combatTestSelectedCharacterIds).order('created_at');
+    }
+    let equipmentResult = await supabase.from('inventory_items').select('id, character_id, item_effect, is_equipped, items(item_effect)').in('character_id', combatTestSelectedCharacterIds).eq('is_equipped', true);
+    if (equipmentResult.error && /items|relation|schema cache/i.test(equipmentResult.error.message)) {
+      equipmentResult = await supabase.from('inventory_items').select('id, character_id, item_effect, is_equipped').in('character_id', combatTestSelectedCharacterIds).eq('is_equipped', true);
+    }
+    combatTestLoading = false;
+    if (cardsResult.error) return showNotice(`카드 덱을 불러오지 못했습니다: ${cardsResult.error.message}`);
+    if (equipmentResult.error) {
+      if (/is_equipped|column|schema cache/i.test(equipmentResult.error.message)) return showNotice('장착 효과를 불러오려면 add_inventory_equipment.sql을 먼저 실행해 주세요.');
+      return showNotice(`장착 효과를 불러오지 못했습니다: ${equipmentResult.error.message}`);
+    }
+
+    const cardsByCharacter = new Map();
+    for (const card of cardsResult.data || []) {
+      const quantity = Math.max(1, Number(card.quantity) || 1);
+      const copies = Array.from({ length: quantity }, (_, copyIndex) => ({ ...card, card_exhaust_effect: card.card_exhaust_effect || '', card_drop_effect: card.card_drop_effect || '', card_drop_count: Math.max(0, Number(card.card_drop_count) || 0), card_retain: Boolean(card.card_retain), card_innate: Boolean(card.card_innate), card_ethereal: Boolean(card.card_ethereal), card_type: card.card_type || '스킬', card_target: card.card_target || '자신', energy: Number(card.energy) || 0, copyIndex, instanceId: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}` }));
+      cardsByCharacter.set(card.character_id, [...(cardsByCharacter.get(card.character_id) || []), ...copies]);
+    }
+    const effectsByCharacter = new Map();
+    for (const item of equipmentResult.data || []) {
+      const catalog = Array.isArray(item.items) ? item.items[0] : item.items;
+      const effect = String(catalog?.item_effect || item.item_effect || '').trim();
+      if (!effect) continue;
+      const effects = effectsByCharacter.get(item.character_id) || [];
+      if (!effects.includes(effect)) effectsByCharacter.set(item.character_id, [...effects, effect]);
+    }
+
+    combatTestPlayers = combatTestSelectedCharacterIds
+      .map((characterId) => adminCharacters.find((character) => character.id === characterId))
+      .filter(Boolean)
+      .map((character) => {
+        const deckCards = cardsByCharacter.get(character.id) || [];
+        return drawCombatTestOpeningHand({
+          characterId: character.id,
+          name: character.name,
+          nickname: character.nickname,
+          avatarUrl: character.avatar_url || '',
+          hp: Number(character.hp) || 0,
+          maxHp: Number(character.max_hp) || 0,
+          equippedEffects: effectsByCharacter.get(character.id) || [],
+          deckCards,
+          drawPile: createCombatTestDrawPile(deckCards),
+          exhaustedCards: [],
+          hand: []
+        });
+      });
+    combatTestTurn = 1;
+    combatTestStarted = true;
+  }
+
+  function nextCombatTestTurn() {
+    if (!combatTestStarted || !combatTestPlayers.length) return;
+    combatTestPlayers = combatTestPlayers.map((player) => {
+      const etherealCards = (player.hand || []).filter((card) => card.card_ethereal);
+      const retainedCards = (player.hand || []).filter((card) => card.card_retain && !card.card_ethereal);
+      return drawCombatTestHand({ ...player, hand: retainedCards, exhaustedCards: [...(player.exhaustedCards || []), ...etherealCards] }, Math.max(0, 5 - retainedCards.length));
+    });
+    combatTestTurn += 1;
+  }
+
+  function playCombatTestCard(characterId, drawId) {
+    if (!combatTestStarted || !characterId || !drawId) return;
+    const player = combatTestPlayers.find((candidate) => candidate.characterId === characterId);
+    const card = player?.hand?.find((candidate) => candidate.drawId === drawId);
+    if (!player || !card) return;
+    const hand = player.hand.filter((candidate) => candidate.drawId !== drawId);
+    const isExhausted = Boolean(card.combat_rule?.exhaust);
+    const leavesDeck = isExhausted || card.card_type === '파워';
+    const nextPlayer = {
+      ...player,
+      hand,
+      exhaustedCards: leavesDeck ? [...(player.exhaustedCards || []), card] : [...(player.exhaustedCards || [])]
+    };
+    const dropCount = Math.max(0, Number(card.card_drop_count) || 0);
+    const updatedPlayer = dropCount ? drawCombatTestCards(nextPlayer, dropCount) : nextPlayer;
+    combatTestPlayers = combatTestPlayers.map((candidate) => candidate.characterId === characterId ? updatedPlayer : candidate);
+    const actionText = [isExhausted ? '소멸' : leavesDeck ? '파워 사용' : '버림', dropCount ? `추가 ${dropCount}장 드로우` : ''].filter(Boolean).join(' · ');
+    showNotice(`${card.card_name || '카드'} 사용: ${actionText}`);
+  }
+
+  async function writeCombatTestClipboard(copyText) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(copyText);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = copyText;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    if (!copied) throw new Error('copy command failed');
+  }
+
+  async function copyCombatTestCards() {
+    if (!combatTestStarted || !combatTestPlayers.length) return showNotice('복사할 카드 목록이 없습니다.');
+    try {
+      await writeCombatTestClipboard(formatCombatTestCards(combatTestPlayers, combatTestTurn, true));
+      showNotice('모든 플레이어의 드롭 카드 목록을 복사했습니다.');
+    } catch {
+      showNotice('카드 목록을 복사하지 못했습니다.');
+    }
+  }
+
+  async function copyCombatTestPlayerCards(player) {
+    if (!combatTestStarted || !player) return showNotice('복사할 카드 목록이 없습니다.');
+    try {
+      await writeCombatTestClipboard(formatCombatTestCards([player], combatTestTurn, true));
+      showNotice(`${player.name}의 카드 목록을 복사했습니다.`);
+    } catch {
+      showNotice('카드 목록을 복사하지 못했습니다.');
+    }
+  }
+
+  function resetCombatTest() {
+    combatTestPlayers = [];
+    combatTestStarted = false;
+    combatTestTurn = 0;
   }
 
   async function loadCharacterRecords(characterId) {
     extraRecordCharacterId = characterId;
     extraRecords = [];
     relationships = [];
-    const recordsResult = await supabase.from('character_extra_records').select('id, title, content, author_id, created_at, profiles(nickname)').eq('character_id', characterId).order('created_at', { ascending: false });
+    const [recordsResult, relationshipsResult] = await Promise.all([
+      supabase.from('character_extra_records').select('id, title, content, author_id, created_at, profiles(nickname)').eq('character_id', characterId).order('created_at', { ascending: false }),
+      supabase.from('character_relationships').select('id, relationship_name, memo, npc_post_id, created_at, posts(id, title, board_slug)').eq('character_id', characterId).order('created_at', { ascending: false })
+    ]);
     if (!recordsResult.error) {
       extraRecords = (recordsResult.data || []).map((record) => ({ ...record, authorName: record.profiles?.nickname || '모험가' }));
     }
-    const relationshipsResult = await supabase.from('character_relationships').select('id, relationship_name, memo, npc_post_id, created_at, posts(id, title, board_slug)').eq('character_id', characterId).order('created_at', { ascending: false });
     if (!relationshipsResult.error) {
       relationships = (relationshipsResult.data || []).map((relationship) => ({ ...relationship, npcTitle: relationship.posts?.title || '' }));
     }
@@ -1436,9 +2554,16 @@
 
   async function saveCardsWithEnergyFallback(rows) {
     if (!rows.length) return null;
+    let fallbackRows = rows;
     let result = await supabase.from('character_cards').insert(rows);
+    if (result.error && /card_exhaust_effect|card_drop_effect|card_drop_count|card_retain|card_innate|card_ethereal|card_type|card_target|column|schema cache/i.test(result.error.message)) {
+      if (rows.some((card) => card.card_exhaust_effect || card.card_drop_effect || card.card_drop_count > 0 || card.card_retain || card.card_innate || card.card_ethereal || card.card_type !== '스킬' || card.card_target !== '자신')) return new Error('카드 키워드·타입·대상 컬럼이 없습니다. 새 SQL을 실행한 뒤 다시 저장해 주세요.');
+      fallbackRows = rows.map(({ card_exhaust_effect, card_drop_effect, card_drop_count, card_retain, card_innate, card_ethereal, card_type, card_target, ...card }) => card);
+      result = await supabase.from('character_cards').insert(fallbackRows);
+    }
     if (result.error && /energy|column|schema cache/i.test(result.error.message)) {
-      result = await supabase.from('character_cards').insert(rows.map(({ energy, ...card }) => card));
+      fallbackRows = fallbackRows.map(({ energy, ...card }) => card);
+      result = await supabase.from('character_cards').insert(fallbackRows);
     }
     return result.error || null;
   }
@@ -1446,68 +2571,86 @@
   async function saveInventoryWithIconFallback(rows) {
     if (!rows.length) return null;
     let result = await supabase.from('inventory_items').insert(rows);
-    if (result.error && /item_id|icon_url|column|schema cache/i.test(result.error.message)) {
-      result = await supabase.from('inventory_items').insert(rows.map(({ item_id, icon_url, ...item }) => item));
+    if (result.error && /item_id|icon_url|item_description|is_equipped|column|schema cache/i.test(result.error.message)) {
+      result = await supabase.from('inventory_items').insert(rows.map(({ item_id, icon_url, item_description, is_equipped, ...item }) => item));
     }
     return result.error || null;
   }
 
-  async function loadCharacterData() {
-    const requestId = ++characterRequestId;
+  async function loadCharacterData(force = false) {
     if (!supabase || !user) {
       characterLoading = false;
       adminLoading = false;
       return;
     }
 
+    const mode = isAdmin
+      ? (currentRoute === 'admin' ? 'admin-list' : 'admin-rich')
+      : 'player';
+    const loadKey = `${user.id}:${mode}`;
+    if (!force && characterLoadedKey === loadKey && Date.now() - characterLoadedAt < 30000) return;
+    if (!force && characterLoadPromises.has(loadKey)) return characterLoadPromises.get(loadKey);
+
+    const requestId = ++characterRequestId;
+
     characterLoading = true;
     adminLoading = isAdmin;
     characterError = '';
 
-    try {
-      const characterQuery = isAdmin
-        ? supabase.from('characters').select('*').order('created_at', { ascending: false })
-        : supabase.from('characters').select('*').eq('owner_id', user.id).maybeSingle();
-      const { data, error } = await Promise.race([
-        characterQuery,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('캐릭터 정보 조회 시간이 초과되었습니다.')), 10000))
-      ]);
-      if (error) throw new Error(error.message);
+    const loadPromise = (async () => {
+      try {
+        const adminSelect = mode === 'admin-list'
+          ? 'id, owner_id, name, role_name, age, created_at'
+          : 'id, owner_id, name, role_name, age, avatar_url, hp, max_hp, created_at';
+        const characterQuery = isAdmin
+          ? supabase.from('characters').select(adminSelect).order('created_at', { ascending: false })
+          : supabase.from('characters').select('*').eq('owner_id', user.id).maybeSingle();
+        const { data, error } = await Promise.race([
+          characterQuery,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('캐릭터 정보 조회 시간이 초과되었습니다.')), 10000))
+        ]);
+        if (error) throw new Error(error.message);
 
-      if (isAdmin) {
-        const rows = data || [];
-        const ids = [...new Set(rows.map((row) => row.owner_id))];
-        const profilesResult = ids.length ? await supabase.from('profiles').select('id, nickname').in('id', ids) : { data: [] };
-        if (profilesResult.error) throw new Error(profilesResult.error.message);
-        const names = new Map((profilesResult.data || []).map((item) => [item.id, item.nickname]));
-        if (requestId === characterRequestId) adminCharacters = rows.map((row) => ({ ...row, nickname: names.get(row.owner_id) || '모험가' }));
-        return;
+        if (isAdmin) {
+          const rows = data || [];
+          const ids = [...new Set(rows.map((row) => row.owner_id))];
+          const profilesResult = ids.length ? await supabase.from('profiles').select('id, nickname').in('id', ids) : { data: [] };
+          if (profilesResult.error) throw new Error(profilesResult.error.message);
+          const names = new Map((profilesResult.data || []).map((item) => [item.id, item.nickname]));
+          if (requestId === characterRequestId) adminCharacters = rows.map((row) => ({ ...row, nickname: names.get(row.owner_id) || '모험가' }));
+        } else {
+          if (requestId !== characterRequestId) return;
+          character = data || null;
+          profileImagePreview = character?.avatar_url || '';
+          setCharacterForm(character);
+          await syncCharacterAvatarToProfile(character?.avatar_url || null);
+          if (!character) {
+            inventory = [];
+            cards = [];
+          } else {
+            const { itemsResult, cardsResult } = await loadCharacterCollections(character.id);
+            if (itemsResult.error) throw new Error(itemsResult.error.message);
+            if (cardsResult.error) throw new Error(cardsResult.error.message);
+            inventory = (itemsResult.data || []).map((item) => resolveInventoryItem(item));
+            cards = cardsResult.data || [];
+            await loadCharacterRecords(character.id);
+          }
+        }
+        if (requestId === characterRequestId) {
+          characterLoadedKey = loadKey;
+          characterLoadedAt = Date.now();
+        }
+      } catch (error) {
+        if (requestId === characterRequestId) characterError = error instanceof Error ? error.message : '캐릭터 정보를 불러오지 못했습니다.';
+      } finally {
+        if (requestId === characterRequestId) {
+          characterLoading = false;
+          adminLoading = false;
+        }
       }
-
-      if (requestId !== characterRequestId) return;
-      character = data || null;
-      profileImagePreview = character?.avatar_url || '';
-      setCharacterForm(character);
-      await syncCharacterAvatarToProfile(character?.avatar_url || null);
-      if (!character) {
-        inventory = [];
-        cards = [];
-        return;
-      }
-      const { itemsResult, cardsResult } = await loadCharacterCollections(character.id);
-      if (itemsResult.error) throw new Error(itemsResult.error.message);
-      if (cardsResult.error) throw new Error(cardsResult.error.message);
-      inventory = (itemsResult.data || []).map((item) => resolveInventoryItem(item));
-      cards = cardsResult.data || [];
-      await loadCharacterRecords(character.id);
-    } catch (error) {
-      if (requestId === characterRequestId) characterError = error instanceof Error ? error.message : '캐릭터 정보를 불러오지 못했습니다.';
-    } finally {
-      if (requestId === characterRequestId) {
-        characterLoading = false;
-        adminLoading = false;
-      }
-    }
+    })().finally(() => characterLoadPromises.delete(loadKey));
+    characterLoadPromises.set(loadKey, loadPromise);
+    return loadPromise;
   }
 
   async function saveCharacter() {
@@ -1516,7 +2659,7 @@
     characterSaving = true;
     let profileImageUrl = profileImagePreview && !profileImagePreview.startsWith('blob:') ? profileImagePreview : '';
     if (profileImageFile) {
-      try { profileImageUrl = await imageFileToDataUrl(profileImageFile); } catch (error) { characterSaving = false; return showNotice(error instanceof Error ? error.message : '프로필 이미지를 처리하지 못했습니다.'); }
+      try { profileImageUrl = await uploadProfileImage(profileImageFile); } catch (error) { characterSaving = false; return showNotice(error instanceof Error ? error.message : '프로필 이미지를 처리하지 못했습니다.'); }
     }
     const payload = { owner_id: user.id, name: characterForm.name.trim(), class_name: characterForm.roleName.trim(), content: characterForm.roleTraits.trim(), status: 'published', role_name: characterForm.roleName.trim(), role_traits: characterForm.roleTraits.trim(), age: numberOrNull(characterForm.age), height: numberOrNull(characterForm.height), weight: numberOrNull(characterForm.weight), avatar_url: profileImageUrl || null };
     let characterResult = character?.id ? await supabase.from('characters').update(payload).eq('id', character.id).select().single() : await supabase.from('characters').insert(payload).select().single();
@@ -1526,10 +2669,15 @@
     }
     if (characterResult.error) { characterSaving = false; return showNotice(`캐릭터 저장 실패: ${characterResult.error.message}`); }
     character = characterResult.data;
+    const accentColor = getReadableAccentColor(profileAccentColor);
+    const profileColorResult = await supabase.from('profiles').update({ accent_color: accentColor }).eq('id', user.id);
+    if (profileColorResult.error && !/accent_color|column|schema cache/i.test(profileColorResult.error.message)) showNotice(`프로필 색상 저장에 실패했습니다: ${profileColorResult.error.message}`);
+    profile = { ...profile, accent_color: accentColor };
+    profileAccentColor = accentColor;
     const avatarSynced = await syncCharacterAvatarToProfile(character?.avatar_url || null, true);
     profileImageFile = null; characterSaving = false;
     if (avatarSynced !== false) showNotice('캐릭터 기본 정보와 프로필 사진을 저장했습니다.');
-    await loadCharacterData();
+    await loadCharacterData(true);
   }
 
   async function createPlayerAccount() {
@@ -1539,25 +2687,30 @@
     const { error } = await supabase.functions.invoke('admin-create-user', { body: { loginId: adminForm.loginId.trim(), password: adminForm.password, nickname: adminForm.nickname.trim(), character: adminForm.character } });
     accountSaving = false;
     if (error) return showNotice(`계정 생성 실패: ${error.message}`);
-    adminForm = { loginId: '', password: '', nickname: '', character: { name: '', roleName: '', roleTraits: '', age: '', height: '', weight: '' } }; showNotice('플레이어 계정과 캐릭터를 생성했습니다.'); await loadCharacterData();
+    adminForm = { loginId: '', password: '', nickname: '', character: { name: '', roleName: '', roleTraits: '', age: '', height: '', weight: '', money: '0' } }; showNotice('플레이어 계정과 캐릭터를 생성했습니다.'); await loadCharacterData(true);
   }
 
   onMount(() => {
-    if (audio) { audio.volume = volume; audio.muted = muted; }
-    audio?.play().catch(() => {});
     syncRoute();
 
     // Register routing before the remote database/auth boot sequence. A slow
     // Supabase request must never prevent hash links from changing the page.
     window.addEventListener('hashchange', syncRoute);
     let authSubscription;
+    const updateWritingViewport = () => {
+      const viewportHeight = window.visualViewport?.height || window.innerHeight;
+      document.documentElement.style.setProperty('--writing-viewport-height', `${Math.round(viewportHeight)}px`);
+    };
+    updateWritingViewport();
+    window.addEventListener('resize', updateWritingViewport);
+    window.visualViewport?.addEventListener('resize', updateWritingViewport);
 
     const initialize = async () => {
-      await loadDatabase();
-      if (!supabase) { authReady = true; return; }
+      const databasePromise = loadDatabase();
+      if (!supabase) { await databasePromise; authReady = true; return; }
       if (currentRoute === 'admin') profileLoading = true;
       const { data } = await supabase.auth.getSession();
-      await applySession(data.session);
+      await Promise.all([databasePromise, applySession(data.session)]);
       const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
         // Supabase advises deferring database calls from this callback so the
         // auth lock can finish before profiles/characters are queried.
@@ -1583,558 +2736,240 @@
     return () => {
       authSubscription?.unsubscribe();
       window.removeEventListener('hashchange', syncRoute);
+      window.removeEventListener('resize', updateWritingViewport);
+      window.visualViewport?.removeEventListener('resize', updateWritingViewport);
+      document.documentElement.style.removeProperty('--writing-viewport-height');
     };
   });
 </script>
 
 <svelte:head><title>open door — 장기 TRPG 캠페인 기록소</title><meta name="description" content="세계관, 캐릭터, 세션 기록을 함께 쌓아가는 open door 장기 TRPG 캠페인 사이트입니다." /></svelte:head>
-<audio bind:this={audio} loop src="/pixel-shrine-drift.mp3"></audio>
-
 <div class="site" class:writing-mode={isWritePage}><div class="bg-grid" aria-hidden="true"></div><div class="bg-glow bg-glow-a" aria-hidden="true"></div><div class="bg-glow bg-glow-b" aria-hidden="true"></div>
   <header class="header"><a class="brand" href="#home" aria-label="open door 홈"><span class="brand-mark">od</span><span class="brand-copy"><strong>open door</strong><small>long-form TRPG campaign</small></span></a>
-     <nav class="main-nav" aria-label="주요 메뉴"><a class:active={currentRoute === 'home'} href="#home">홈</a><div class="nav-item nav-dropdown"><a class:active={currentRoute === 'board/notices' || currentRoute === 'board/sessions'} href="#board/notices" aria-haspopup="true">공지사항</a><div class="dropdown-menu" aria-label="공지사항 메뉴"><a href="#board/notices"><strong>공지사항</strong><small>운영 안내 · 업데이트 · 이벤트</small></a><a href="#board/sessions"><strong>세션 로그</strong><small>플레이 기록 · 후기 · 다음화 예고</small></a></div></div><div class="nav-item nav-dropdown"><a class:active={['board/npc', 'board/world', 'board/continents', 'board/system', 'board/bgm'].includes(currentRoute)} href="#board/world" aria-haspopup="true">세계관</a><div class="dropdown-menu" aria-label="세계관 메뉴"><a href="#board/npc"><strong>NPC 게시판</strong><small>NPC 초상화 · 성격 · 관계 · 특징</small></a><a href="#board/world"><strong>세계관 자료실</strong><small>세계관 · 국가 · 역사 · 설정 자료</small></a><a href="#board/continents"><strong>대륙 게시판</strong><small>대륙 · 지형 · 도시 · 주요 장소</small></a><a href="#board/system"><strong>시스템 게시판</strong><small>규칙 · 전투 · 판정 · 캠페인 시스템</small></a><a href="#board/bgm"><strong>BGM 게시판</strong><small>맵 · 캐릭터 · 장면별 배경음악</small></a></div></div><a class:active={currentRoute === 'board/users'} href="#board/users">유저게시판</a>{#if user}<a class:active={isMyPage || isAdminPage || isAdminMypage} href={isAdmin ? '#admin-mypage' : '#mypage'} on:click={openProfile}>마이페이지</a>{/if}</nav>
-    <div class="header-actions"><div class="audio-pill" role="group" aria-label="사운드 설정"><button class="audio-toggle" on:click={toggleSound} aria-pressed={muted}><span class="audio-icon" aria-hidden="true">{muted ? '×' : '♪'}</span><span>{muted ? 'Muted' : 'Sound'}</span></button><input class="audio-slider" type="range" min="0" max="1" step="0.01" value={volume} on:input={updateVolume} aria-label="볼륨 조절" /></div>{#if user}<button class="login logged-in" on:click={handleLogout}>로그아웃</button>{:else}<button class="login" on:click={() => (showLogin = true)}>로그인</button>{/if}</div>
+     <nav class="main-nav" aria-label="주요 메뉴"><a class:active={currentRoute === 'home'} href="#home">홈</a><div class="nav-item nav-dropdown"><a class:active={currentRoute === 'board/notices' || currentRoute === 'board/sessions'} href="#board/notices" aria-haspopup="true">공지사항</a><div class="dropdown-menu" aria-label="공지사항 메뉴"><a href="#board/notices"><strong>공지사항</strong><small>운영 안내 · 업데이트 · 이벤트</small></a><a href="#board/sessions"><strong>세션 로그</strong><small>플레이 기록 · 후기 · 다음화 예고</small></a></div></div><div class="nav-item nav-dropdown"><a class:active={['board/npc', 'board/world', 'board/continents', 'board/system', 'board/bgm'].includes(currentRoute)} href="#board/world" aria-haspopup="true">세계관</a><div class="dropdown-menu" aria-label="세계관 메뉴"><a href="#board/npc"><strong>NPC 게시판</strong><small>NPC 초상화 · 성격 · 관계 · 특징</small></a><a href="#board/world"><strong>세계관 자료실</strong><small>세계관 · 국가 · 역사 · 설정 자료</small></a><a href="#board/continents"><strong>대륙 게시판</strong><small>대륙 · 지형 · 도시 · 주요 장소</small></a><a href="#board/system"><strong>시스템 게시판</strong><small>규칙 · 전투 · 판정 · 캠페인 시스템</small></a><a href="#board/bgm"><strong>BGM 게시판</strong><small>맵 · 캐릭터 · 장면별 배경음악</small></a></div></div><div class="nav-item nav-dropdown"><a class:active={currentRoute === 'board/users' || isMiniGamesPage || isDiceRollerPage} href="#board/users" aria-haspopup="true">유저게시판</a><div class="dropdown-menu" aria-label="유저게시판 메뉴"><a href="#board/users"><strong>유저 게시글</strong><small>질문 · 잡담 · 파티 모집</small></a><a href="#minigames"><strong>미니게임</strong><small>주사위 굴리기 · 간단한 놀이</small></a></div></div><a class:active={isCombatPage} href="#combat">전투</a><a class:active={isShopPage} href="#shop">상점</a>{#if user}<a class:active={isMyPage || isAdminPage || isAdminMypage} href={isAdmin ? '#admin-mypage' : '#mypage'} on:click={openProfile}>마이페이지</a>{/if}</nav>
+    <div class="header-actions">{#if user}<button class="login logged-in" on:click={handleLogout}>로그아웃</button>{:else}<button class="login" on:click={() => (showLogin = true)}>로그인</button>{/if}</div>
   </header>
 
-   <main id="home" class="layout">
+   <main id="home" class:wide-admin={isAdminItemsPage} class="layout">
     {#key currentRoute}
-    {#if currentRoute === 'home'}
-      <section class="hero"><div class="hero-copy"><p class="eyebrow">LONG-FORM TRPG CAMPAIGN</p><h1>문이 열리면,<br /><em>모험이 시작됩니다</em></h1><p class="lead">세계관을 함께 읽고, 캐릭터를 만들고, 한 번의 세션을 오래 기억하세요.<br class="desktop-only" /> open door는 장기 TRPG 캠페인을 위한 기록 공간입니다.</p><div class="hero-cta"><button class="primary-btn" on:click={(event) => user ? openProfile(event) : (showLogin = true)}>마이페이지 <span>↗</span></button><a class="text-link" href="#board/sessions">세션 기록 보기 <span>→</span></a></div></div><div class="hero-side"><div class="hero-side-head"><span class="live-mark">LIVE</span><span>campaign archive</span><span class="spark">✦</span></div><div class="pulse-orbit" aria-hidden="true"><span class="orbit-dot one"></span><span class="orbit-dot two"></span><span class="orbit-dot three"></span><div class="pulse-core">✦<br />TRPG</div></div></div></section>
-      <!-- 게시판 안내 섹션은 필요할 때 복원할 수 있도록 임시 보관합니다.
-      <section class="board-directory panel" aria-labelledby="board-directory-title"><div class="section-head board-directory-head"><div><p class="eyebrow">CHOOSE YOUR PATH</p><h2 id="board-directory-title">게시판 안내</h2></div><div class="directory-meta"><p class="section-caption">세계관을 읽고, 캐릭터를 만들고,<br class="desktop-only" /> 함께 모험을 기록해 보세요.</p><span class={`data-status ${dbStatus}`}><i></i>{dbStatus === 'connected' ? 'LIVE DATABASE' : dbStatus === 'loading' ? '데이터 불러오는 중' : 'DB 연결 확인 필요'}</span></div></div><div class="board-grid">{#each categories.slice(1) as category, index}<a class="board-card" class:featured={index === 1} href={`#board/${category.slug}`}><span class="board-number">0{index + 1}</span><span class="board-copy"><strong>{category.name}</strong><small>{category.description}</small></span><span class="board-arrow">↗</span></a>{/each}</div></section>
-      -->
-      <section class="content-grid"><section class="notice-panel panel"><div class="section-head"><div><p class="eyebrow">KEEP IN MIND</p><h2>공지사항</h2></div><a href="#board/notices">전체 보기 <span>→</span></a></div><div class="notice-list">{#if notices.length}{#each notices as item}<a class="notice-item" href="#board/notices"><span class={`badge ${item.tone}`}>{item.tag}</span><div class="notice-copy"><h3>{item.title}</h3><p>{item.body}</p></div><div class="notice-meta"><span>{item.meta}</span><b>→</b></div></a>{/each}{:else}<div class="notice-empty">아직 등록된 공지사항이 없습니다.</div>{/if}</div></section></section>
-       <section class="posts panel"><div class="section-head posts-head"><div><p class="eyebrow">FROM THE CAMPAIGN</p><h2>최근 게시글</h2></div><div class="head-actions"><span class="result-count">총 {filteredPosts.length}개의 글</span><select bind:value={sortBy} aria-label="게시글 정렬"><option value="latest">최신순</option><option value="popular">인기순</option></select></div></div><div class="toolbar"><div class="category-tabs" role="tablist" aria-label="게시글 카테고리">{#each categories as category}<button class:active={activeCategory === category.name} class="category-tab" type="button" on:click={() => (activeCategory = category.name)}>{category.name}<span>{category.count}</span></button>{/each}</div><label class="search"><span aria-hidden="true">⌕</span><input bind:value={searchTerm} type="search" placeholder="게시글 검색" aria-label="게시글 검색" /></label></div><div class="post-list" aria-live="polite">{#if filteredPosts.length}{#each pagedFilteredPosts as post}<a class="post-row" href={`#post/${post.id}`}>{#if post.avatarUrl}<img class="avatar avatar-image" src={post.avatarUrl} alt={`${post.author} 프로필 사진`} />{:else}<span class={`avatar ${post.color}`}>{post.avatar}</span>{/if}<span class="post-main"><span class="post-meta"><b>{post.category}</b><span>{post.date} · {post.time}</span></span><strong>{post.title}</strong><small>{post.excerpt}</small></span><span class="post-author"><b>{post.author}</b><small>작성자</small></span><span class="post-stats"><span>댓글 {post.comments}</span><span>좋아요 {post.likes}</span></span><span class="post-arrow">→</span></a>{/each}{:else}<div class="empty-state"><span>⌕</span><strong>아직 등록된 글이 없어요</strong><p>로그인 후 첫 번째 이야기를 작성해 보세요.</p></div>{/if}</div><div class="pagination">{#each Array(filteredPageCount) as _, index}<button class:active={currentPage === index + 1} type="button" on:click={() => (currentPage = index + 1)}>{index + 1}</button>{/each}</div><div class="load-more"><button on:click={() => startWriting('users')}>새 글 작성 <span>↗</span></button></div></section>
-    {:else if isBoardPage}
-       <section class="board-page panel"><div class="board-page-hero"><a class="back-link" href="#home">← 홈으로 돌아가기</a><p class="eyebrow">BOARD / {currentBoard.slug.toUpperCase()}</p><h1>{currentBoard.name}</h1><p>{currentBoard.description}.</p>{#if isAdmin || currentBoard.slug === 'users'}<button class="primary-btn" on:click={() => startWriting(currentBoard.slug)}>새 글 작성 <span>↗</span></button>{/if}</div><div class="board-page-content"><div class="section-head board-page-head"><div><p class="eyebrow">{currentBoard.name.toUpperCase()}</p><h2>게시글 목록</h2></div><div class="head-actions"><span class="result-count">총 {boardPagePosts.length}개의 글</span><select bind:value={sortBy} aria-label="게시글 정렬"><option value="latest">최신순</option><option value="popular">인기순</option></select></div></div><div class="board-toolbar"><label class="notice-filter" class:hidden={currentBoard.slug !== 'notices'}>분류<select bind:value={noticeTypeFilter}><option value="all">전체</option><option value="notice">공지사항</option><option value="patch">패치노트</option><option value="event">이벤트</option></select></label><label class="session-player-filter" class:hidden={currentBoard.slug !== 'sessions'}>플레이어<select bind:value={sessionPlayerFilter}><option value="">전체 플레이어</option>{#each sessionPlayerFilterOptions as player}<option value={player.value}>{player.label}</option>{/each}</select></label><label class="search"><span aria-hidden="true">⌕</span><input bind:value={searchTerm} type="search" placeholder="이 게시판에서 검색" aria-label="이 게시판에서 검색" /></label></div><div class="post-list board-post-list" aria-live="polite">{#if boardPagePosts.length}{#each pagedBoardPosts as post}<a class="post-row" href={`#post/${post.id}`}>{#if post.avatarUrl}<img class="avatar avatar-image" src={post.avatarUrl} alt={`${post.author} 프로필 사진`} />{:else}<span class={`avatar ${post.color}`}>{post.avatar}</span>{/if}<span class="post-main"><span class="post-meta"><b>{post.category}</b><span>{post.date} · {post.time}</span></span><strong>{post.title}</strong><small>{post.excerpt}</small></span><span class="post-author"><b>{post.author}</b><small>작성자</small></span><span class="post-stats"><span>댓글 {post.comments}</span><span>좋아요 {post.likes}</span></span><span class="post-arrow">→</span></a>{/each}{:else}<div class="empty-state"><span>⌕</span><strong>아직 등록된 글이 없어요</strong><p>첫 번째 이야기를 작성해 보세요.</p></div>{/if}</div><div class="pagination">{#each Array(boardPageCount) as _, index}<button class:active={currentPage === index + 1} type="button" on:click={() => (currentPage = index + 1)}>{index + 1}</button>{/each}</div></div></section>
-    {:else if isPostPage}
-      <section class="detail-page panel">{#if detailLoading}<div class="empty-state"><span>◌</span><strong>게시글을 불러오는 중이에요</strong></div>{:else if detailPost}<a class="back-link" href={`#board/${detailPost.boardSlug}`}>← {detailPost.category}로 돌아가기</a><div class="detail-meta"><span class="badge gold">{detailPost.category}</span><span>{detailPost.date} · {detailPost.time}</span><span>조회 {detailPost.views}</span></div><h1>{detailPost.title}</h1><div class="detail-author"><span class={`avatar ${detailPost.color}`}>{detailPost.avatar}</span><b>{detailPost.author}</b><span>작성자</span>{#if user?.id === detailPost.authorId}<button class="danger-btn" type="button" on:click={() => deletePost(detailPost)}>게시글 삭제</button>{/if}</div>{#if detailPost.boardSlug === 'npc'}<div class="npc-detail-grid">{#if detailPost.imageUrl}<img src={detailPost.imageUrl} alt={`${detailPost.title} 이미지`} />{:else}<div class="npc-detail-placeholder">이미지 없음</div>{/if}<div><dl><dt>이름</dt><dd>{detailPost.npcName || '미등록'}</dd><dt>나이</dt><dd>{detailPost.npcAge || '미등록'}</dd><dt>성별</dt><dd>{detailPost.npcGender || '미등록'}</dd><dt>키</dt><dd>{detailPost.npcHeight ? `${detailPost.npcHeight}cm` : '미등록'}</dd><dt>종족</dt><dd>{detailPost.npcRace || '미등록'}</dd><dt>역할/직업</dt><dd>{detailPost.npcRole || '미등록'}</dd><dt>소속</dt><dd>{detailPost.npcAffiliation || '미등록'}</dd><dt>성격</dt><dd>{detailPost.npcPersonality || '미등록'}</dd><dt>특징</dt><dd>{detailPost.npcTraits || '미등록'}</dd></dl></div></div>{/if}<div class="detail-body">{@html detailHtml}</div>{#if detailPost.youtubeUrl}<div class="youtube-embed"><iframe src={detailPost.youtubeUrl} title="YouTube 영상" allowfullscreen></iframe></div>{/if}<div class="detail-actions"><button class:liked={detailLiked} class="like-button" type="button" on:click={toggleLike} disabled={detailLikeSaving}>♥ 좋아요 {detailPost.likes}</button><span>댓글 {detailPost.comments}개</span></div><section class="comments-section" aria-labelledby="comments-title"><div class="comments-heading"><h2 id="comments-title">댓글</h2><span>{detailComments.length}개</span></div>{#if detailComments.length}{#each detailComments as comment}<article class="comment-item"><div class="comment-author"><span class="avatar mint">{comment.nickname.slice(0, 1)}</span><strong>{comment.nickname}</strong><time>{formatDate(comment.created_at).date}</time>{#if user?.id === comment.author_id}<button class="danger-btn" type="button" on:click={() => deleteComment(comment)}>삭제</button>{/if}</div><p>{comment.content}</p></article>{/each}{:else}<div class="comments-empty">아직 댓글이 없습니다. 첫 번째 의견을 남겨 보세요.</div>{/if}<form class="comment-form" on:submit|preventDefault={addComment}><textarea bind:value={commentText} rows="3" placeholder={user ? '이 모험에 대한 생각을 남겨 주세요.' : '로그인 후 댓글을 작성할 수 있어요.'} disabled={!user}></textarea><button class="primary-btn" type="submit" disabled={commentSaving}>{commentSaving ? '등록 중…' : '댓글 등록'} <span>↗</span></button></form></section><div class="detail-footer"><a href={`#write/${detailPost.boardSlug}`}>이 게시판에 글쓰기 <span>↗</span></a><span>모험의 기록을 함께 이어가요</span></div>{:else}<div class="empty-state"><span>?</span><strong>게시글을 찾을 수 없어요</strong><a class="text-link" href="#home">홈으로 돌아가기 →</a></div>{/if}</section>
-    {:else if isWritePage || isEditPage}
-      <section class="write-page panel">
-        <a class="back-link" href={'#board/' + writeBoard.slug}>← {writeBoard.name}로 돌아가기</a>
-        <p class="eyebrow">{isEditPage ? 'EDIT CAMPAIGN RECORD' : 'NEW CAMPAIGN RECORD'}</p>
-        <h1>{isEditPage ? (writeBoardSlug === 'sessions' ? '세션 기록 수정' : '게시글 수정') : '새 이야기 작성'}</h1>
-        <p class="page-lead">{isEditPage ? '등록된 기록을 같은 편집기에서 수정해 주세요.' : '게시판을 선택하고 모험의 기록을 작성해 주세요.'}</p>
-        <form class="editor-form" on:submit|preventDefault={createPost}>
-          <label>게시판<select bind:value={writeBoardSlug} disabled={isEditPage}>{#each categories.slice(1).filter((board) => isAdmin || board.slug === 'users' || (isEditPage && editingPostId && board.slug === writeBoardSlug)) as board}<option value={board.slug}>{board.name}</option>{/each}</select></label>
-          {#if writeBoardSlug === 'notices'}<label>공지 유형<select bind:value={postForm.postType}><option value="notice">공지사항</option><option value="patch">패치노트</option><option value="event">이벤트</option></select></label>{/if}
-          {#if writeBoardSlug === 'npc'}
-            <div class="npc-form-section"><p class="form-hint">NPC PROFILE</p><div class="field-grid"><label>이름<input bind:value={postForm.npcName} placeholder="예: 아르델" /></label><label>나이<input bind:value={postForm.npcAge} type="number" min="0" placeholder="예: 32" /></label><label>성별<input bind:value={postForm.npcGender} placeholder="예: 여성" /></label><label>키 (cm)<input bind:value={postForm.npcHeight} type="number" min="0" step="0.1" placeholder="예: 168" /></label><label>종족<input bind:value={postForm.npcRace} placeholder="예: 인간" /></label><label>역할/직업<input bind:value={postForm.npcRole} placeholder="예: 국경 수비대장" /></label><label>소속<input bind:value={postForm.npcAffiliation} placeholder="예: 북부 연합" /></label><label>성격<input bind:value={postForm.npcPersonality} placeholder="예: 냉정하지만 약자를 돕는다" /></label><label class="field-wide">NPC 특징<textarea bind:value={postForm.npcTraits} rows="4" placeholder="외형, 능력, 말투, 관계, TRPG 진행에 필요한 특징"></textarea></label><label class="npc-photo-field field-wide"><span>프로필 이미지</span><span class="npc-photo-preview">{#if npcImagePreview}<img src={npcImagePreview} alt="NPC 미리보기" />{:else}<span class="npc-photo-empty">사진을 선택하면 여기에 미리보기됩니다</span>{/if}</span><input type="file" accept="image/png,image/jpeg,image/webp" on:change={handleNpcImageChange} /></label></div></div>
-          {/if}
-          {#if writeBoardSlug === 'bgm'}
-            <div class="bgm-form-section"><p class="form-hint">BGM LIBRARY</p><div class="field-grid"><label>BGM 분류<select bind:value={postForm.bgmCategory}><option value="map">맵 BGM</option><option value="character">캐릭터 BGM</option><option value="scene">장면 BGM</option><option value="etc">기타 BGM</option></select></label><label class="field-wide">오디오 URL (선택)<input bind:value={postForm.bgmUrl} type="url" placeholder="https://example.com/theme.mp3" /></label><label class="bgm-file-field field-wide">오디오 파일 (선택)<input type="file" accept="audio/mpeg,audio/ogg,audio/wav,audio/x-wav,audio/mp4,audio/aac" on:change={handleBgmFileChange} />{#if postForm.bgmFile}<span>{postForm.bgmFile.name} · 업로드 예정</span>{/if}</label></div><p class="form-note">URL 또는 파일 중 하나를 등록해 주세요. 파일은 BGM 게시판에 업로드되어 세션에서 선택할 수 있습니다.</p></div>
-          {/if}
-          {#if writeBoardSlug !== 'npc'}<label>제목<input bind:value={postForm.title} maxlength="120" placeholder="글 제목을 입력해 주세요" /></label>{/if}
-          {#if writeBoardSlug === 'sessions'}
-            <div class="editor-field">
-              <span>내용</span>
-              <div class="session-composer">
-                <div class="session-composer-head"><div><p class="eyebrow">SESSION LOG BUILDER</p><h2>플레이 기록</h2><p>+ 버튼으로 지문, 대사, 사진을 원하는 순서대로 쌓아 보세요.</p></div><div class="session-add-menu"><span>+ 항목 추가</span><button type="button" on:click={() => addSessionEntry('narration')}>지문</button><button type="button" on:click={() => addSessionEntry('dialogue')}>대사</button><button type="button" on:click={() => addSessionEntry('image')}>사진</button></div></div>
-                <div class="session-participants">
-                  <div class="session-participants-head"><div><strong>세션 참여자</strong><span>이번 세션에 등장한 캐릭터와 NPC를 추가해 주세요.</span></div><button class="subtle-btn" type="button" on:click={addSessionParticipant}>+ 참여자 추가</button></div>
-                  {#if sessionParticipants.length}
-                    <div class="session-participant-list">
-                      {#each sessionParticipants as participant, participantIndex (participant.id)}
-                        <div class="session-participant-row"><select value={sessionParticipantValue(participant)} on:change={(event) => setSessionParticipant(participant, event.currentTarget.value)}><option value="custom:">직접 입력</option>{#if adminCharacters.length}<optgroup label="캐릭터">{#each adminCharacters as character}<option value={'character:' + character.id}>{character.name}</option>{/each}</optgroup>{/if}{#if npcOptions.length}<optgroup label="NPC">{#each npcOptions as npc}<option value={'npc:' + npc.id}>{npc.npcName || npc.title}</option>{/each}</optgroup>{/if}</select>{#if participant.participantType === 'custom'}<input bind:value={participant.participantName} placeholder="참여자 이름" />{:else}<span>{sessionParticipantName(participant)}</span>{/if}<button class="icon-btn" type="button" on:click={() => removeSessionParticipant(participantIndex)} aria-label="참여자 삭제">×</button></div>
-                      {/each}
-                    </div>
-                  {:else}<p class="session-participants-empty">등록된 참여자가 없습니다.</p>{/if}
-                </div>
-                <div class="session-bgms">
-                  <div class="session-participants-head"><div><strong>세션 BGM</strong><span>이번 세션에서 사용할 등록된 BGM을 선택해 주세요.</span></div><button class="subtle-btn" type="button" on:click={addSessionBgm}>+ BGM 추가</button></div>
-                  {#if bgmOptions.length}
-                    {#if sessionBgmIds.length}<div class="session-bgm-list">{#each sessionBgmIds as bgmId, bgmIndex}<div class="session-bgm-row"><select value={bgmId} on:change={(event) => setSessionBgm(bgmIndex, event.currentTarget.value)}><option value="">BGM을 선택해 주세요</option>{#each bgmOptions as bgm}<option value={bgm.id}>{bgm.title} · {{ map: '맵', character: '캐릭터', scene: '장면', etc: '기타' }[bgm.bgmCategory] || 'BGM'}</option>{/each}</select><button class="icon-btn" type="button" on:click={() => removeSessionBgm(bgmIndex)} aria-label="BGM 삭제">×</button></div>{/each}</div>{:else}<p class="session-participants-empty">등록된 BGM이 없습니다. + BGM 추가를 눌러 선택해 주세요.</p>{/if}
-                  {:else}<p class="session-participants-empty">등록된 BGM이 없습니다. <a href="#board/bgm">BGM 게시판에서 먼저 등록해 주세요.</a></p>{/if}
-                </div>
-                <div class="session-entry-list">
-                  {#if sessionEntries.length}
-                    {#each sessionEntries as entry, index (entry.id)}
-                      <article class={'session-entry session-entry-' + entry.type}>
-                        <div class="session-entry-top"><span class="session-entry-number">{String(index + 1).padStart(2, '0')}</span><strong>{entry.type === 'narration' ? '지문' : entry.type === 'dialogue' ? '대사' : '사진'}</strong><div class="session-entry-actions"><button class="icon-btn" type="button" disabled={index === 0} on:click={() => moveSessionEntry(index, -1)} aria-label="위로 이동">↑</button><button class="icon-btn" type="button" disabled={index === sessionEntries.length - 1} on:click={() => moveSessionEntry(index, 1)} aria-label="아래로 이동">↓</button><button class="icon-btn" type="button" on:click={() => removeSessionEntry(index)} aria-label="항목 삭제">×</button></div></div>
-                        {#if entry.type === 'narration'}
-                          <div class="session-entry-meta"><label>지문의 주체<select value={sessionActorValue(entry)} on:change={(event) => setSessionActor(entry, event.currentTarget.value)}><option value="none:">없음</option><option value="custom:">직접 입력</option>{#if adminCharacters.length}<optgroup label="캐릭터">{#each adminCharacters as character}<option value={'character:' + character.id}>{character.name}</option>{/each}</optgroup>{/if}{#if npcOptions.length}<optgroup label="NPC">{#each npcOptions as npc}<option value={'npc:' + npc.id}>{npc.npcName || npc.title}</option>{/each}</optgroup>{/if}</select></label>{#if entry.actorType === 'custom'}<label>이름<input bind:value={entry.actorName} placeholder="지문을 묘사하는 이름" /></label>{/if}</div>
-                        {:else if entry.type === 'dialogue'}
-                          <div class="session-entry-meta"><label>말한 사람<select value={sessionSpeakerValue(entry)} on:change={(event) => setSessionSpeaker(entry, event.currentTarget.value)}><option value="anonymous:">??? (얼굴 없는 대사)</option><option value="custom:">직접 입력</option>{#if adminCharacters.length}<optgroup label="캐릭터">{#each adminCharacters as character}<option value={'character:' + character.id}>{character.name}</option>{/each}</optgroup>{/if}{#if npcOptions.length}<optgroup label="NPC">{#each npcOptions as npc}<option value={'npc:' + npc.id}>{npc.npcName || npc.title}</option>{/each}</optgroup>{/if}</select></label>{#if entry.speakerType === 'custom'}<label>이름<input bind:value={entry.speakerName} placeholder="대사 이름" /></label>{/if}</div>
-                        {:else}
-                          <label class="session-image-picker">사진<input type="file" accept="image/png,image/jpeg,image/webp" on:change={(event) => handleSessionImageChange(event, index)} />{#if entry.imageUrl}<img src={entry.imageUrl} alt="세션 사진 미리보기" />{:else}<span>사진을 선택해 주세요</span>{/if}</label>
-                          <label>사진 설명 (선택)<input bind:value={entry.caption} placeholder="장면 설명이나 사진 캡션" /></label>
-                        {/if}
-                        {#if entry.type !== 'image'}<label class="session-entry-text">{entry.type === 'narration' ? '지문 내용' : '대사 내용'}<textarea bind:value={entry.text} rows="4" placeholder={entry.type === 'narration' ? '행동, 분위기, 상황을 적어 주세요.' : '캐릭터 또는 NPC의 대사를 적어 주세요.'}></textarea></label>{/if}
-                      </article>
-                    {/each}
-                  {:else}<div class="session-entry-empty"><strong>아직 항목이 없습니다</strong><span>위의 + 항목 추가에서 지문, 대사, 사진을 골라 주세요.</span></div>{/if}
-                </div>
-              </div>
-            </div>
+     {#if currentRoute === 'home'}
+       <HomePage
+         {notices}
+         {categories}
+         {filteredPosts}
+         {pagedFilteredPosts}
+         {filteredPageCount}
+         bind:activeCategory
+         bind:searchTerm
+         bind:sortBy
+         {currentPage}
+         {user}
+         {openProfile}
+         requestLogin={() => (showLogin = true)}
+         {startWriting}
+         changePage={(page) => (currentPage = page)}
+       />
+     {:else if isBoardPage && BoardPage}
+       <svelte:component this={BoardPage}
+         {currentBoard}
+         {boardPagePosts}
+         {pagedBoardPosts}
+         {boardPageCount}
+         {isAdmin}
+         bind:sortBy
+         bind:searchTerm
+         bind:noticeTypeFilter
+         bind:sessionPlayerFilter
+         {sessionPlayerFilterOptions}
+         {currentPage}
+         {startWriting}
+         changePage={(page) => (currentPage = page)}
+       />
+      {:else if isMiniGamesPage && MiniGamesPage}
+        <svelte:component this={MiniGamesPage} />
+      {:else if isDiceRollerPage && DiceRollerPage}
+        <svelte:component this={DiceRollerPage} />
+      {:else if isPostPage && PostDetailPage}
+        <svelte:component this={PostDetailPage}
+         {detailLoading}
+         {detailError}
+         retryDetail={()=>loadPostDetail(currentRoute.slice(5))}
+         {detailPost}
+         {detailHtml}
+         {detailComments}
+         bind:commentText
+         {detailLiked}
+         {detailLikeSaving}
+         {commentSaving}
+         {user}
+         {formatDate}
+         {deletePost}
+         {toggleLike}
+         {addComment}
+          {deleteComment}
+        />
+      {:else if isShopPage && ShopPage}
+        <svelte:component this={ShopPage}
+          {authReady}
+          {user}
+          {shopLoading}
+          {shopError}
+          {shopListings}
+          {shopBalance}
+          {shopPurchaseQuantities}
+          {shopPurchaseSaving}
+          {isAdmin}
+          {setShopPurchaseQuantity}
+          {purchaseShopItem}
+          requestLogin={() => (showLogin = true)}
+          {getInventoryIcon}
+          {isImageIcon}
+        />
+      {:else if isCombatPage && CombatPage}
+        {#key user?.id}
+          <svelte:component this={CombatPage} {user} {authReady} {profileLoading} {isAdmin} {currentRoute} requestLogin={() => (showLogin = true)} />
+        {/key}
+      {:else if isAdminCombatTestPage && AdminCombatTestPage}
+        <svelte:component this={AdminCombatTestPage}
+          {authReady}
+          {profileLoading}
+          {isAdmin}
+          {currentRoute}
+          {adminLoading}
+          {adminCharacters}
+          selectedCharacterIds={combatTestSelectedCharacterIds}
+          {combatTestPlayers}
+          {combatTestLoading}
+          {combatTestStarted}
+          {combatTestTurn}
+          {toggleCombatTestCharacter}
+          {startCombatTest}
+          {nextCombatTestTurn}
+          {playCombatTestCard}
+          {copyCombatTestCards}
+          {copyCombatTestPlayerCards}
+          {resetCombatTest}
+        />
+      {:else if isAdminMonstersPage && AdminMonstersPage}
+        <svelte:component this={AdminMonstersPage} {authReady} {profileLoading} {isAdmin} />
+      {:else if isAdminItemsPage && AdminItemsPage}
+       <svelte:component this={AdminItemsPage}
+         {authReady}
+         {profileLoading}
+         {isAdmin}
+         {currentRoute}
+         bind:itemForm
+         {itemFormImagePreview}
+         {itemSaving}
+         {catalogItems}
+         {filteredCatalogItems}
+         {catalogLoading}
+         bind:catalogSearchTerm
+         {resetItemForm}
+         {saveCatalogItem}
+         {editCatalogItem}
+         {deleteCatalogItem}
+         {handleItemFormImageChange}
+         {getInventoryIcon}
+         {isImageIcon}
+       />
+     {:else if (isWritePage || isEditPage) && WritePage}
+       <svelte:component this={WritePage}
+         {isEditPage}
+         {writeBoard}
+         bind:writeBoardSlug
+         {categories}
+         {isAdmin}
+         {editingPostId}
+         bind:postForm
+         {npcImagePreview}
+         {postSaving}
+         {editLoading}
+         bind:richEditorElement
+         {sessionEntries}
+         {sessionParticipants}
+         {sessionBgmIds}
+         {adminCharacters}
+         {npcOptions}
+         {bgmOptions}
+         {sessionParticipantValue}
+         {sessionParticipantName}
+         {sessionActorParticipants}
+         {sessionParticipantActorValue}
+         {setSessionParticipant}
+         {addSessionParticipant}
+         {removeSessionParticipant}
+         {addSessionBgm}
+         {setSessionBgm}
+         {removeSessionBgm}
+         {addSessionEntry}
+         {removeSessionEntry}
+         {moveSessionEntry}
+         {sessionActorValue}
+         {setSessionActor}
+         {sessionSpeakerValue}
+         {setSessionSpeaker}
+         {handleSessionImageChange}
+         {handleNpcImageChange}
+         {handleBgmFileChange}
+         {createPost}
+       />
+      {:else if isAdminMypage && AdminMypage}
+        <svelte:component this={AdminMypage} {authReady} {profileLoading} {isAdmin} bind:adminProfileForm {adminProfileSaving} {saveAdminProfile} />
+      {:else if isAdminShopPage && AdminShopPage}
+        <svelte:component this={AdminShopPage}
+          {authReady}
+          {profileLoading}
+          {isAdmin}
+          {currentRoute}
+          {adminShopLoading}
+          {adminShopListings}
+          {catalogItems}
+          bind:shopForm
+          {shopAdminSaving}
+          {resetShopForm}
+          {editShopListing}
+          {saveShopListing}
+          {deleteShopListing}
+          {getInventoryIcon}
+          {isImageIcon}
+        />
+      {:else if isMyPage && MyPage}
+       <svelte:component this={MyPage} {profile} {character} {characterError} {characterLoading} bind:profileSection bind:characterForm {profileImagePreview} {characterSaving} {extraRecords} bind:extraRecordForm {extraRecordSaving} {relationships} bind:relationshipForm {relationshipSaving} {npcOptions} {inventory} equippedItems={equippedInventory} {cards} {selectedInventoryItem} {equipmentSaving} {user} {isAdmin} {accountForm} {accountSettingsSaving} {handleProfileImageChange} {saveCharacter} {saveExtraRecord} {deleteExtraRecord} {saveRelationship} {deleteRelationship} {selectInventoryItem} {isEquippableItem} {toggleInventoryEquipment} {getInventoryIcon} {isImageIcon} {saveAccountPassword} />
+     {:else if isAdminCharacterPage && AdminCharacterPage}
+       <svelte:component this={AdminCharacterPage} {authReady} {profileLoading} {adminDetailLoading} {isAdmin} {adminSelectedCharacter} bind:adminCharacterForm {adminCharacterSaving} {extraRecords} bind:extraRecordForm {extraRecordSaving} {adminInventory} equippedItems={adminEquippedInventory} {equipmentSaving} {adminCards} {catalogItems} {filteredInventoryCatalogItems} bind:inventorySearchTerm {cardGrades} {saveAdminCharacter} {deleteAdminCharacter} {saveExtraRecord} {deleteExtraRecord} {addCatalogItemToInventory} {removeAdminInventory} {isEquippableItem} {toggleInventoryEquipment} {newAdminCard} {removeAdminCard} {getInventoryIcon} {isImageIcon} />
+      {:else if isAdminPage && AdminPage}
+        <svelte:component this={AdminPage} {authReady} {profileLoading} {isAdmin} {currentRoute} bind:adminForm {accountSaving} {createPlayerAccount} {adminLoading} {adminCharacters} {selectAdminCharacter} />
+      {:else}
+        <section class="panel route-loading"><div class="empty-state"><span>◌</span><strong>페이지를 준비하는 중이에요</strong><p>필요한 화면만 빠르게 불러오고 있습니다.</p></div></section>
+      {/if}
+      {/key}
+      {#if isMyPage && profileSection === 'inventory' && selectedInventoryItem && isChestItem(selectedInventoryItem)}
+        <section class="chest-open-panel panel" aria-label="상자 열기">
+          <div><p class="eyebrow">CHEST REWARD</p><strong>{selectedInventoryItem.item_name}</strong><span>무작위 보상 {selectedInventoryItem.chest_reward_count || 1}개</span></div>
+          <button class="primary-btn" type="button" on:click={openInventoryChest} disabled={openingChest || !selectedInventoryItem.chest_reward_item_ids?.length}>{openingChest ? '상자 여는 중…' : '상자 열기'} <span>↗</span></button>
+        </section>
+      {/if}
+    </main>
+    {#if openingChest}
+      <div class="chest-overlay" role="dialog" aria-modal="true" aria-label="상자 열기 연출">
+        <div class:revealed={chestOpeningDone} class="chest-opening-modal">
+          <div class="chest-opening-heading"><p class="eyebrow">MYSTERY CHEST</p><h2>{chestOpeningDone ? '보상 획득!' : '상자를 여는 중'}</h2><span>{chestOpeningDone ? '운명의 보상이 도착했습니다.' : '어떤 아이템이 나올까요?'}</span></div>
+          {#if chestOpeningDone}
+            <div class="chest-reward-list">{#each chestOpeningRewards as reward}<article><span class="chest-reward-icon">{#if isImageIcon(getInventoryIcon(reward))}<img src={getInventoryIcon(reward)} alt="" />{:else}{getInventoryIcon(reward)}{/if}</span><div><strong>{reward.item_name}</strong><small>{reward.grade} · {reward.item_type}</small></div><b>+1</b></article>{/each}</div>
+            <button class="primary-btn chest-result-button" type="button" on:click={closeChestOpening}>보상 확인 <span>↗</span></button>
+          {:else if chestOpeningReady}
+            <div class="roulette-stage"><span class="roulette-pointer">▼</span><div class="roulette-window"><div class="roulette-track" style={rouletteTrackStyle}>{#each chestOpeningTiles as tile}<div class="roulette-tile" aria-hidden="true">{#if isImageIcon(getInventoryIcon(tile))}<img src={getInventoryIcon(tile)} alt="" />{:else}<span>{getInventoryIcon(tile)}</span>{/if}</div>{/each}</div></div></div>
+            <div class="chest-opening-status"><span class="status-pulse"></span> 보상 목록을 섞는 중 <b>· · ·</b></div>
           {:else}
-            <div class="editor-field"><span>{writeBoardSlug === 'npc' ? '상세 설명' : '내용'}</span>{#if writeBoardSlug === 'users'}<div class="rich-editor-host" bind:this={richEditorElement}></div>{:else}<textarea bind:value={postForm.content} rows="14" placeholder={writeBoardSlug === 'npc' ? 'TRPG 진행에 필요한 추가 설명을 작성해 주세요' : '모험의 기록을 남겨 주세요'}></textarea>{/if}</div>
+            <div class="chest-loading-stage"><span class="chest-loading-orb">▣</span><strong>상자 잠금 해제 중</strong><span>보상 테이블을 불러오고 있습니다</span></div>
+            <div class="chest-opening-status"><span class="status-pulse"></span> 보상 목록을 준비하는 중 <b>· · ·</b></div>
           {/if}
-          <div class="form-actions"><a class="text-link" href={'#board/' + writeBoard.slug}>취소</a><button class="primary-btn" type="submit" disabled={postSaving || (isEditPage && editLoading)}>{postSaving ? '저장 중…' : editLoading ? '기존 내용 불러오는 중…' : editingPostId ? (writeBoardSlug === 'sessions' ? '세션 기록 수정' : '게시글 수정') : '게시글 등록'} <span>↗</span></button></div>
-        </form>
-      </section>
-    {:else if isAdminMypage && (!authReady || profileLoading)}
-      <section class="admin-mypage panel"><div class="empty-state"><span>◌</span><strong>관리자 정보를 불러오는 중이에요</strong></div></section>
-    {:else if isAdminMypage && isAdmin}
-      <section class="admin-mypage panel"><div class="page-heading"><p class="eyebrow">ADMIN ACCOUNT</p><h1>관리자 마이페이지</h1><p>관리자 표시명과 로그인 비밀번호를 변경할 수 있습니다.</p></div><form class="editor-form admin-profile-form" on:submit|preventDefault={saveAdminProfile}><label>표시명<input bind:value={adminProfileForm.nickname} maxlength="40" placeholder="표시명" /></label><label>새 비밀번호<input bind:value={adminProfileForm.newPassword} type="password" minlength="8" autocomplete="new-password" placeholder="변경할 때만 입력" /></label><label>새 비밀번호 확인<input bind:value={adminProfileForm.confirmPassword} type="password" minlength="8" autocomplete="new-password" placeholder="새 비밀번호를 다시 입력" /></label><div class="form-actions"><button class="primary-btn" type="submit" disabled={adminProfileSaving}>{adminProfileSaving ? '저장 중…' : '계정 정보 저장'} <span>↗</span></button></div></form><div class="admin-mypage-links"><a class="text-link" href="#admin">관리자 페이지로 이동 <span>→</span></a></div></section>
-    {:else if isAdminMypage}
-      <section class="about-page panel"><p class="eyebrow">ACCESS RESTRICTED</p><h1>관리자 권한이<br /><em>필요합니다</em></h1><p class="about-lead">이 페이지는 관리자 계정만 이용할 수 있습니다.</p><a class="primary-btn about-button" href="#home">홈으로 돌아가기 <span>→</span></a></section>
-    {:else if isMyPage}
-      <section class="mypage panel"><div class="page-heading"><p class="eyebrow">ADVENTURER PROFILE</p><h1>마이페이지</h1><p>{profile?.nickname || '모험가'}님의 캐릭터와 소지품을 관리하는 공간입니다.</p></div>{#if characterError}<div class="error-box">캐릭터 테이블을 확인해 주세요: {characterError}</div>{/if}{#if characterLoading}<div class="empty-state"><span>◌</span><strong>캐릭터 정보를 불러오는 중이에요</strong></div>{:else}<div class="profile-layout"><aside class="profile-sidebar"><button class:active={profileSection === 'basic'} type="button" on:click={() => (profileSection = 'basic')}>기본 정보<span>CHARACTER</span></button><button class:active={profileSection === 'combat'} type="button" on:click={() => (profileSection = 'combat')}>전투 정보<span>COMBAT</span></button><button class:active={profileSection === 'extra'} type="button" on:click={() => (profileSection = 'extra')}>추가 기록<span>EXTRA NOTES</span></button><button class:active={profileSection === 'relationships'} type="button" on:click={() => (profileSection = 'relationships')}>관계<span>RELATIONSHIPS</span></button><button class:active={profileSection === 'inventory'} type="button" on:click={() => (profileSection = 'inventory')}>인벤토리<span>INVENTORY</span></button><button class:active={profileSection === 'cards'} type="button" on:click={() => (profileSection = 'cards')}>보유 카드<span>CARDS</span></button></aside><form class="character-form profile-content" on:submit|preventDefault={saveCharacter}>{#if profileSection === 'basic'}<div class="form-section"><div class="form-section-head"><div><p class="eyebrow">CHARACTER SHEET</p><h2>캐릭터 기본 정보</h2></div></div><div class="profile-photo-row"><label class="profile-photo-field"><span>프로필 이미지</span><span class="profile-photo-preview">{#if profileImagePreview}<img src={profileImagePreview} alt="프로필 미리보기" />{:else}<span>사진을 선택해 주세요</span>{/if}</span><input type="file" accept="image/png,image/jpeg,image/webp" on:change={handleProfileImageChange} /></label><div class="field-grid profile-fields"><label>이름<input bind:value={characterForm.name} placeholder="캐릭터 이름" /></label><label>역할명<input bind:value={characterForm.roleName} placeholder="역할명" /></label><label>나이<input bind:value={characterForm.age} type="number" min="0" placeholder="예: 27" /></label><label>키 (cm)<input bind:value={characterForm.height} type="number" min="0" step="0.1" placeholder="예: 172" /></label><label>몸무게 (kg)<input bind:value={characterForm.weight} type="number" min="0" step="0.1" placeholder="예: 64" /></label><label class="field-wide">특징<textarea bind:value={characterForm.roleTraits} rows="3" placeholder="역할의 특징, 성격, 전투 방식"></textarea></label></div></div><div class="form-actions"><button class="primary-btn" type="submit" disabled={characterSaving}>{characterSaving ? '저장 중…' : '기본 정보 저장'} <span>↗</span></button></div></div>{:else if profileSection === 'combat'}<div class="form-section combat-section"><div class="form-section-head"><div><p class="eyebrow">COMBAT STATUS</p><h2>전투 정보</h2></div></div><div class="combat-grid"><label>레벨<input value={character?.level ?? 1} disabled /></label><label>돈<input value={character?.money ?? 0} disabled /></label><label>HP<input value={`${character?.hp ?? 0} / ${character?.max_hp ?? 0}`} disabled /></label></div><p class="form-note">{character?.combat_notes || '등록된 전투 메모가 없습니다.'}</p></div>{:else if profileSection === 'extra'}<div class="form-section extra-record-section"><div class="form-section-head"><div><p class="eyebrow">PERSONAL NOTES</p><h2>추가 기록</h2></div><span class="form-hint">게시판형 기록</span></div>{#if extraRecords.length}<div class="record-board">{#each extraRecords as record}<article class="record-board-item"><div class="record-board-meta"><strong>{record.title}</strong><span>{record.authorName} · {new Date(record.created_at).toLocaleDateString('ko-KR')}</span></div><p>{record.content}</p>{#if isAdmin || record.author_id === user?.id}<button class="record-delete" type="button" on:click={() => deleteExtraRecord(record)}>기록 삭제</button>{/if}</article>{/each}</div>{:else}<div class="repeat-empty">등록된 추가 기록이 없습니다.</div>{/if}<div class="record-compose"><input bind:value={extraRecordForm.title} placeholder="기록 제목" /><textarea bind:value={extraRecordForm.content} rows="5" placeholder="소환수, 개인 특징, 장기 목표 등 기록할 내용을 작성해 주세요."></textarea><button class="primary-btn" type="button" on:click={saveExtraRecord} disabled={extraRecordSaving}>{extraRecordSaving ? '등록 중…' : '기록 등록'} <span>↗</span></button></div></div>{:else if profileSection === 'relationships'}<div class="form-section relationship-section"><div class="form-section-head"><div><p class="eyebrow">RELATIONSHIPS</p><h2>관계</h2></div><span class="form-hint">호감도 없이 메모로 관리</span></div>{#if relationships.length}<div class="relationship-list">{#each relationships as relationship}<article class="relationship-item"><div class="relationship-item-head"><strong>{relationship.relationship_name}</strong>{#if relationship.npc_post_id}<a href={'#post/' + relationship.npc_post_id}>{relationship.npcTitle || 'NPC 페이지 열기'} ↗</a>{/if}</div>{#if relationship.memo}<p>{relationship.memo}</p>{/if}<button class="record-delete" type="button" on:click={() => deleteRelationship(relationship)}>관계 삭제</button></article>{/each}</div>{:else}<div class="repeat-empty">등록된 관계가 없습니다.</div>{/if}<div class="relationship-compose"><input bind:value={relationshipForm.name} placeholder="관계 이름 (예: 아르델과의 관계)" /><select bind:value={relationshipForm.npcPostId}><option value="">NPC 링크 없음</option>{#each npcOptions as npc}<option value={npc.id}>{npc.title}</option>{/each}</select><textarea bind:value={relationshipForm.memo} rows="5" placeholder="관계 메모를 작성해 주세요."></textarea><button class="primary-btn" type="button" on:click={saveRelationship} disabled={relationshipSaving}>{relationshipSaving ? '등록 중…' : '관계 등록'} <span>↗</span></button></div></div>{:else if profileSection === 'inventory'}<div class="form-section readonly-collection"><div class="form-section-head"><div><p class="eyebrow">INVENTORY</p><h2>인벤토리</h2></div></div>{#if inventory.length}<div class="inventory-game-layout"><div class="inventory-slots">{#each inventory as item}<button class:active={selectedInventoryItem?.id === item.id} class="inventory-slot" type="button" on:click={() => selectInventoryItem(item)}><span class="slot-icon">{#if isImageIcon(getInventoryIcon(item)) }<img src={getInventoryIcon(item)} alt="" />{:else}{getInventoryIcon(item)}{/if}</span><span class="slot-count">{item.quantity}</span></button>{/each}</div>{#if selectedInventoryItem}<article class="inventory-detail"><div class="inventory-detail-icon">{#if isImageIcon(getInventoryIcon(selectedInventoryItem)) }<img src={getInventoryIcon(selectedInventoryItem)} alt="" />{:else}{getInventoryIcon(selectedInventoryItem)}{/if}</div><div><p class="eyebrow">ITEM DETAIL</p><h3>{selectedInventoryItem.item_name}</h3><p>{selectedInventoryItem.item_effect || '등록된 효과가 없습니다.'}</p><div><span class="tag">{selectedInventoryItem.grade}</span><span class="tag">{selectedInventoryItem.item_type}</span><span class="inventory-quantity">× {selectedInventoryItem.quantity}</span></div></div></article>{:else}<div class="inventory-detail empty"><span>아이템을 선택하세요</span></div>{/if}</div>{:else}<div class="repeat-empty">등록된 아이템이 없습니다.</div>{/if}</div>{:else}<div class="form-section readonly-collection"><div class="form-section-head"><div><p class="eyebrow">CARDS</p><h2>보유 카드</h2></div></div>{#if cards.length}<div class="cards-grid">{#each cards as card}<article class="owned-card"><div class="owned-card-top"><strong>{card.card_name}</strong><span>{card.energy || 0} energy</span></div><p>{card.card_effect || '등록된 효과가 없습니다.'}</p><div><span class="tag">{card.grade}</span><span class="inventory-quantity">× {card.quantity}</span></div></article>{/each}</div>{:else}<div class="repeat-empty">등록된 카드가 없습니다.</div>{/if}</div>{/if}</form></div>{/if}</section>
-    {:else if isAdminCharacterPage && (!authReady || profileLoading || adminDetailLoading)}
-      <section class="character-detail-page panel"><div class="empty-state"><span>◌</span><strong>캐릭터 상세 정보를 불러오는 중이에요</strong></div></section>
-    {:else if isAdminCharacterPage && isAdmin && adminSelectedCharacter}
-      <section class="character-detail-page panel"><a class="back-link" href="#admin">← 관리자 관리 페이지로 돌아가기</a><div class="admin-detail-header">{#if adminSelectedCharacter.avatar_url}<img src={adminSelectedCharacter.avatar_url} alt={`${adminSelectedCharacter.name} 프로필 사진`} />{:else}<span class="admin-detail-avatar">{adminSelectedCharacter.name.slice(0, 1)}</span>{/if}<div><p class="eyebrow">CHARACTER PROFILE</p><h1>{adminSelectedCharacter.name}</h1><p>{adminSelectedCharacter.nickname || '모험가'} · {adminSelectedCharacter.role_name || '역할 미등록'}</p></div><button class="danger-btn" type="button" on:click={deleteAdminCharacter}>캐릭터 삭제</button></div><form class="character-form" on:submit|preventDefault={saveAdminCharacter}><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">CHARACTER SHEET</p><h2>기본 정보</h2></div></div><div class="field-grid"><label>캐릭터 이름<input bind:value={adminCharacterForm.name} /></label><label>역할명<input bind:value={adminCharacterForm.roleName} /></label><label>나이<input bind:value={adminCharacterForm.age} type="number" min="0" /></label><label>키 (cm)<input bind:value={adminCharacterForm.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminCharacterForm.weight} type="number" min="0" step="0.1" /></label><label class="field-wide">역할 특징<textarea bind:value={adminCharacterForm.roleTraits} rows="5"></textarea></label></div></div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">COMBAT STATUS</p><h2>전투 정보</h2></div></div><div class="combat-grid"><label>레벨<input bind:value={adminCharacterForm.level} type="number" min="1" /></label><label>돈<input bind:value={adminCharacterForm.money} type="number" min="0" /></label><label>현재 HP<input bind:value={adminCharacterForm.hp} type="number" min="0" /></label><label>최대 HP<input bind:value={adminCharacterForm.maxHp} type="number" min="0" /></label><label class="field-wide">전투 메모<textarea bind:value={adminCharacterForm.combatNotes} rows="3"></textarea></label></div></div><div class="form-section admin-detail-section extra-record-section"><div class="form-section-head"><div><p class="eyebrow">PERSONAL NOTES</p><h2>추가 기록</h2></div><span class="form-hint">게시판형 기록</span></div>{#if extraRecords.length}<div class="record-board">{#each extraRecords as record}<article class="record-board-item"><div class="record-board-meta"><strong>{record.title}</strong><span>{record.authorName} · {new Date(record.created_at).toLocaleDateString('ko-KR')}</span></div><p>{record.content}</p>{#if isAdmin || record.author_id === user?.id}<button class="record-delete" type="button" on:click={() => deleteExtraRecord(record)}>기록 삭제</button>{/if}</article>{/each}</div>{:else}<div class="repeat-empty">등록된 추가 기록이 없습니다.</div>{/if}<div class="record-compose"><input bind:value={extraRecordForm.title} placeholder="기록 제목" /><textarea bind:value={extraRecordForm.content} rows="5" placeholder="소환수, 개인 특징, 장기 목표 등 기록할 내용을 작성해 주세요."></textarea><button class="primary-btn" type="button" on:click={saveExtraRecord} disabled={extraRecordSaving}>{extraRecordSaving ? '등록 중…' : '기록 등록'} <span>↗</span></button></div></div><div class="form-section admin-detail-section inventory-picker-section"><div class="form-section-head"><div><p class="eyebrow">INVENTORY</p><h2>인벤토리</h2></div><a class="subtle-btn" href="#admin/items">아이템 관리 ↗</a></div><div class="inventory-picker"><label class="inventory-search"><span aria-hidden="true">⌕</span><input bind:value={inventorySearchTerm} type="search" placeholder="아이템 이름 또는 효과 검색" aria-label="인벤토리 아이템 검색" /></label>{#if inventorySearchTerm.trim()}<div class="inventory-search-results">{#if filteredInventoryCatalogItems.length}{#each filteredInventoryCatalogItems as catalogItem}<button class="inventory-search-item" type="button" on:click={() => addCatalogItemToInventory(catalogItem)}><span class="admin-item-icon">{#if isImageIcon(getInventoryIcon(catalogItem))}<img src={getInventoryIcon(catalogItem)} alt="" />{:else}{getInventoryIcon(catalogItem)}{/if}</span><span class="inventory-search-copy"><strong>{catalogItem.name}</strong><small>{catalogItem.item_effect || '효과 없음'}</small><span class="tag">{catalogItem.grade}</span><span class="tag">{catalogItem.item_type}</span></span><span class="inventory-search-add">+ 추가</span></button>{/each}{:else}<div class="repeat-empty">검색 결과가 없습니다. <a href="#admin/items">아이템을 먼저 등록해 주세요.</a></div>{/if}</div>{:else}<p class="form-note">검색창에 아이템 이름을 입력하면 카탈로그에서 찾아 인벤토리에 추가할 수 있습니다.</p>{/if}</div>{#if adminInventory.length}<div class="admin-inventory-grid">{#each adminInventory as item, index}<article class="admin-inventory-card"><div class="admin-item-icon">{#if isImageIcon(getInventoryIcon(item))}<img src={getInventoryIcon(item)} alt="" />{:else}{getInventoryIcon(item)}{/if}</div><div class="admin-item-fields"><strong class="inventory-linked-name">{item.item_name}</strong><p class="inventory-linked-effect">{item.item_effect || '등록된 효과가 없습니다.'}</p><div class="admin-item-meta"><label>수량<input bind:value={item.quantity} type="number" min="1" placeholder="개수" /></label><span class="tag">{item.grade}</span><span class="tag">{item.item_type}</span></div></div><button class="icon-btn" type="button" on:click={() => removeAdminInventory(index)} aria-label="아이템 삭제">×</button></article>{/each}</div>{:else}<div class="repeat-empty">등록된 아이템이 없습니다.</div>{/if}</div><div class="form-section admin-detail-section"><div class="form-section-head"><div><p class="eyebrow">CARDS</p><h2>보유 카드</h2></div><button class="subtle-btn" type="button" on:click={newAdminCard}>+ 카드 추가</button></div>{#if adminCards.length}<div class="admin-cards-grid">{#each adminCards as card, index}<article class="admin-card-editor"><div class="owned-card-top"><input bind:value={card.card_name} placeholder="카드명" /><span>{card.energy || 0} energy</span></div><textarea bind:value={card.card_effect} rows="4" placeholder="카드 효과"></textarea><div class="admin-item-meta"><input bind:value={card.quantity} type="number" min="1" placeholder="개수" /><input bind:value={card.energy} type="number" min="0" placeholder="사용 에너지" /><select bind:value={card.grade}>{#each cardGrades as grade}<option>{grade}</option>{/each}</select><button class="icon-btn" type="button" on:click={() => removeAdminCard(index)} aria-label="카드 삭제">×</button></div></article>{/each}</div>{:else}<div class="repeat-empty">등록된 카드가 없습니다.</div>{/if}</div><div class="form-actions admin-detail-actions"><button class="primary-btn" type="submit" disabled={adminCharacterSaving}>{adminCharacterSaving ? '저장 중…' : '변경사항 저장'} <span>↗</span></button></div></form></section>
-    {:else if isAdminPage && (!authReady || profileLoading)}
-      <section class="about-page panel"><p class="eyebrow">CHECKING ACCESS</p><h1>관리자 권한을<br /><em>확인하는 중입니다</em></h1><p class="about-lead">잠시만 기다려 주세요.</p></section>
-      {:else if isAdminItemsPage && (!authReady || profileLoading)}
-      <section class="admin-page panel">
-        <div class="empty-state">
-          <span>◌</span>
-          <strong>관리자 권한을 확인하는 중이에요</strong>
-          <p>잠시만 기다려 주세요.</p>
         </div>
-      </section>
-    {:else if isAdminItemsPage && isAdmin}
-      <section class="admin-page panel">
-        <!-- =========================
-            HEADER
-        ========================== -->
-        <div class="page-heading">
-          <div>
-            <p class="eyebrow">ITEM CATALOG</p>
-            <h1>아이템 관리</h1>
-            <p>
-              TRPG에서 사용할 아이템을 등록하고 관리합니다.
-              등록된 아이템은 플레이어 인벤토리에서 사용할 수 있습니다.
-            </p>
-          </div>
-
-          <a class="subtle-btn" href="#admin">
-            ← 관리자 페이지
-          </a>
-        </div>
-
-
-        <!-- =========================
-            CONTENT
-        ========================== -->
-        <div class="admin-items-layout">
-
-          <!-- =========================
-              LEFT : ITEM FORM
-          ========================== -->
-          <section class="admin-card admin-item-editor">
-
-            <div class="form-section-head">
-              <div>
-                <p class="eyebrow">
-                  {itemForm.id ? 'EDIT ITEM' : 'NEW ITEM'}
-                </p>
-
-                <h2>
-                  {itemForm.id ? '아이템 수정' : '새 아이템 등록'}
-                </h2>
-              </div>
-
-              {#if itemForm.id}
-                <button
-                  class="subtle-btn"
-                  type="button"
-                  on:click={resetItemForm}
-                >
-                  새 아이템
-                </button>
-              {/if}
-            </div>
-
-
-            <form
-              class="editor-form"
-              on:submit|preventDefault={saveCatalogItem}
-            >
-
-              <!-- 아이콘 -->
-              <div class="item-image-editor">
-
-                <label class="item-image-upload">
-
-                  <span class="field-label">
-                    아이템 아이콘
-                  </span>
-
-                  <span class="item-image-preview">
-
-                    {#if itemFormImagePreview}
-
-                      <img
-                        src={itemFormImagePreview}
-                        alt="아이템 아이콘 미리보기"
-                      />
-
-                    {:else}
-
-                      <span class="item-image-placeholder">
-                        ◆
-                      </span>
-
-                    {/if}
-
-                  </span>
-
-                  <span class="item-image-button">
-                    이미지 선택
-                  </span>
-
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    on:change={handleItemFormImageChange}
-                  />
-
-                </label>
-
-                <div class="item-image-help">
-                  <strong>아이콘 이미지</strong>
-                  <p>
-                    PNG, JPG, WEBP<br />
-                    최대 5MB
-                  </p>
-                </div>
-
-              </div>
-
-
-              <!-- 이름 -->
-              <div class="field-grid">
-
-                <label class="field-wide">
-                  아이템 이름
-
-                  <input
-                    bind:value={itemForm.name}
-                    maxlength="100"
-                    placeholder="예: 낡은 철검"
-                    required
-                  />
-                </label>
-
-
-                <!-- 등급 -->
-                <label>
-                  등급
-
-                  <select bind:value={itemForm.grade}>
-
-                    <option value="일반">일반</option>
-                    <option value="고급">고급</option>
-                    <option value="희귀">희귀</option>
-                    <option value="영웅">영웅</option>
-                    <option value="전설">전설</option>
-                    <option value="신화">신화</option>
-
-                  </select>
-
-                </label>
-
-
-                <!-- 타입 -->
-                <label>
-                  아이템 타입
-
-                  <select bind:value={itemForm.item_type}>
-
-                    <option value="장비">장비</option>
-                    <option value="소비">소비</option>
-                    <option value="유물">유물</option>
-                    <option value="기타">기타</option>
-
-                  </select>
-
-                </label>
-
-
-                <!-- 효과 -->
-                <label class="field-wide">
-                  아이템 효과
-
-                  <textarea
-                    bind:value={itemForm.item_effect}
-                    rows="6"
-                    maxlength="1000"
-                    placeholder="아이템의 효과나 설명을 작성해 주세요."
-                  ></textarea>
-
-                </label>
-
-              </div>
-
-
-              <!-- 저장 버튼 -->
-              <div class="form-actions">
-
-                {#if itemForm.id}
-
-                  <button
-                    class="subtle-btn"
-                    type="button"
-                    on:click={resetItemForm}
-                  >
-                    취소
-                  </button>
-
-                {/if}
-
-                <button
-                  class="primary-btn"
-                  type="submit"
-                  disabled={itemSaving}
-                >
-
-                  {#if itemSaving}
-                    저장 중…
-                  {:else if itemForm.id}
-                    아이템 수정
-                  {:else}
-                    아이템 등록
-                  {/if}
-
-                  <span>↗</span>
-
-                </button>
-
-              </div>
-
-            </form>
-
-          </section>
-
-
-          <!-- =========================
-              RIGHT : ITEM LIST
-          ========================== -->
-          <section class="admin-card admin-item-list">
-
-            <div class="form-section-head">
-
-              <div>
-                <p class="eyebrow">ITEM CATALOG</p>
-
-                <h2>
-                  등록된 아이템
-                  <span class="item-count">
-                    {catalogItems.length}
-                  </span>
-                </h2>
-              </div>
-
-            </div>
-
-
-            <!-- 검색 -->
-            <div class="admin-item-toolbar">
-
-              <label class="inventory-search">
-
-                <span aria-hidden="true">⌕</span>
-
-                <input
-                  bind:value={catalogSearchTerm}
-                  type="search"
-                  placeholder="아이템 이름, 효과, 등급, 타입 검색"
-                  aria-label="아이템 검색"
-                />
-
-              </label>
-
-              {#if catalogSearchTerm}
-
-                <button
-                  class="subtle-btn"
-                  type="button"
-                  on:click={() => (catalogSearchTerm = '')}
-                >
-                  검색 초기화
-                </button>
-
-              {/if}
-
-            </div>
-
-
-            <!-- 로딩 -->
-            {#if catalogLoading}
-
-              <div class="empty-state admin-item-empty">
-                <span>◌</span>
-                <strong>아이템 목록을 불러오는 중이에요</strong>
-              </div>
-
-
-            <!-- 검색 결과 없음 -->
-            {:else if !filteredCatalogItems.length}
-
-              <div class="empty-state admin-item-empty">
-
-                <span>◇</span>
-
-                {#if catalogItems.length}
-                  <strong>검색 결과가 없습니다.</strong>
-                  <p>
-                    다른 검색어를 입력해 보세요.
-                  </p>
-                {:else}
-                  <strong>등록된 아이템이 없습니다.</strong>
-                  <p>
-                    왼쪽에서 첫 번째 아이템을 등록해 주세요.
-                  </p>
-                {/if}
-
-              </div>
-
-
-            <!-- 아이템 목록 -->
-            {:else}
-
-              <div class="admin-items-grid">
-
-                {#each filteredCatalogItems as item}
-
-                  <article
-                    class:item-editing={itemForm.id === item.id}
-                    class="admin-item-card"
-                  >
-
-                    <!-- 아이콘 -->
-                    <div class="admin-item-icon">
-
-                      {#if isImageIcon(getInventoryIcon(item))}
-
-                        <img
-                          src={getInventoryIcon(item)}
-                          alt=""
-                        />
-
-                      {:else}
-
-                        <span>
-                          {getInventoryIcon(item)}
-                        </span>
-
-                      {/if}
-
-                    </div>
-
-
-                    <!-- 정보 -->
-                    <div class="admin-item-info">
-
-                      <div class="admin-item-title-row">
-
-                        <h3>
-                          {item.name}
-                        </h3>
-
-                        {#if itemForm.id === item.id}
-                          <span class="editing-badge">
-                            수정 중
-                          </span>
-                        {/if}
-
-                      </div>
-
-
-                      <p class="admin-item-effect">
-
-                        {item.item_effect ||
-                          '등록된 효과가 없습니다.'}
-
-                      </p>
-
-
-                      <div class="admin-item-meta">
-
-                        <span class="tag">
-                          {item.grade}
-                        </span>
-
-                        <span class="tag">
-                          {item.item_type}
-                        </span>
-
-                      </div>
-
-                    </div>
-
-
-                    <!-- 액션 -->
-                    <div class="admin-item-actions">
-
-                      <button
-                        class="subtle-btn"
-                        type="button"
-                        on:click={() => editCatalogItem(item)}
-                      >
-                        수정
-                      </button>
-
-                      <button
-                        class="danger-btn"
-                        type="button"
-                        on:click={() => deleteCatalogItem(item)}
-                      >
-                        삭제
-                      </button>
-
-                    </div>
-
-                  </article>
-
-                {/each}
-
-              </div>
-
-            {/if}
-
-          </section>
-
-        </div>
-
-      </section>
-
-
-    {:else if isAdminItemsPage}
-      <section class="about-page panel">
-
-        <p class="eyebrow">
-          ACCESS RESTRICTED
-        </p>
-
-        <h1>
-          관리자 권한이<br />
-          <em>필요합니다</em>
-        </h1>
-
-        <p class="about-lead">
-          이 페이지는 캠페인 관리자만 이용할 수 있습니다.
-        </p>
-
-        <a
-          class="primary-btn about-button"
-          href={user ? '#mypage' : '#home'}
-        >
-          돌아가기
-          <span>→</span>
-        </a>
-      </section>
-    {:else if isAdminPage && isAdmin}
-      <section class="admin-page panel"><div class="page-heading"><p class="eyebrow">CAMPAIGN ADMIN</p><h1>관리자 관리 페이지</h1><p>플레이어 계정과 마이페이지 정보를 관리합니다.</p></div><div class="admin-layout"><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">ADVENTURER ACCOUNTS</p><h2>플레이어 계정 · 캐릭터 생성</h2></div></div><form class="editor-form" on:submit|preventDefault={createPlayerAccount}><div class="field-grid"><label>로그인 아이디<input bind:value={adminForm.loginId} placeholder="플레이어 아이디" /></label><label>초기 비밀번호<input bind:value={adminForm.password} type="password" minlength="8" placeholder="8자 이상" /></label><label>표시 이름<input bind:value={adminForm.nickname} placeholder="플레이어 이름" /></label><label>캐릭터 이름<input bind:value={adminForm.character.name} placeholder="캐릭터 이름" /></label><label>역할명<input bind:value={adminForm.character.roleName} placeholder="역할명" /></label><label>나이<input bind:value={adminForm.character.age} type="number" min="0" placeholder="나이" /></label><label class="field-wide">역할 특징<textarea bind:value={adminForm.character.roleTraits} rows="3" placeholder="역할의 특징"></textarea></label><label>키 (cm)<input bind:value={adminForm.character.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminForm.character.weight} type="number" min="0" step="0.1" /></label></div><button class="primary-btn" type="submit" disabled={accountSaving}>{accountSaving ? '생성 중…' : '계정과 캐릭터 생성'} <span>↗</span></button></form><p class="form-note">로그인 아이디는 이메일 형식이나 영문·숫자 형식으로 제한하지 않습니다. 비밀번호만 8자 이상 입력해 주세요.</p></section><section class="admin-card"><div class="form-section-head"><div><p class="eyebrow">마이페이지 관리</p><h2>전체 캐릭터 목록</h2></div></div>{#if adminLoading}<div class="repeat-empty">목록을 불러오는 중이에요.</div>{:else if adminCharacters.length}{#each adminCharacters as item}<div class="character-list-item"><span class="avatar mint">{item.name.slice(0, 1)}</span><div><strong>{item.name}</strong><p>{item.nickname} · {item.role_name || '역할 미등록'}</p></div><span class="character-age">{item.age ? `${item.age}세` : '나이 미등록'}</span><button class="subtle-btn character-view-btn" type="button" on:click={() => selectAdminCharacter(item)}>상세보기</button></div>{/each}{:else}<div class="repeat-empty">아직 등록된 캐릭터가 없습니다.</div>{/if}</section><section class="admin-card character-detail-card">{#if adminSelectedCharacter}<div class="form-section-head"><div><p class="eyebrow">CHARACTER DETAIL</p><h2>{adminSelectedCharacter.name}</h2></div><button class="danger-btn" type="button" on:click={deleteAdminCharacter}>캐릭터 삭제</button></div><form class="editor-form" on:submit|preventDefault={saveAdminCharacter}><div class="field-grid"><label>캐릭터 이름<input bind:value={adminCharacterForm.name} /></label><label>역할명<input bind:value={adminCharacterForm.roleName} /></label><label class="field-wide">역할 특징<textarea bind:value={adminCharacterForm.roleTraits} rows="5"></textarea></label><label>나이<input bind:value={adminCharacterForm.age} type="number" min="0" /></label><label>키 (cm)<input bind:value={adminCharacterForm.height} type="number" min="0" step="0.1" /></label><label>몸무게 (kg)<input bind:value={adminCharacterForm.weight} type="number" min="0" step="0.1" /></label></div><div class="form-actions"><button class="primary-btn" type="submit" disabled={adminCharacterSaving}>{adminCharacterSaving ? '저장 중…' : '캐릭터 정보 저장'} <span>↗</span></button></div></form>{:else}<div class="character-detail-empty"><span>✦</span><strong>캐릭터를 선택해 주세요</strong><p>목록에서 상세보기를 누르면 정보를 수정하거나 삭제할 수 있습니다.</p></div>{/if}</section></div></section>
-    {:else if isAdminPage}
-      <section class="about-page panel"><p class="eyebrow">ACCESS RESTRICTED</p><h1>관리자 권한이<br /><em>필요합니다</em></h1><p class="about-lead">이 페이지는 캠페인 관리자만 이용할 수 있습니다.</p><a class="primary-btn about-button" href={user ? '#mypage' : '#home'}>{user ? '마이페이지로 돌아가기' : '홈으로 돌아가기'} <span>→</span></a></section>
-     {/if}
-     {/key}
-   </main>
+      </div>
+    {/if}
   {#if isAdminCharacterPage && adminSelectedCharacter?.avatar_url}<section class="admin-profile-photo panel"><p class="eyebrow">PLAYER PROFILE PHOTO</p><img src={adminSelectedCharacter.avatar_url} alt={`${adminSelectedCharacter.name} 프로필 사진`} /><strong>{adminSelectedCharacter.name}</strong></section>{/if}
-  {#if isMyPage && profileSection === 'inventory'}<section class="inventory-game-panel panel"><div class="section-head"><div><p class="eyebrow">INVENTORY SLOTS</p><h2>인벤토리</h2></div><span class="form-hint">아이콘을 클릭하면 상세 정보가 표시됩니다</span></div>{#if inventory.length}<div class="inventory-game-layout"><div class="inventory-slots">{#each inventory as item}<button class:active={selectedInventoryItem?.id === item.id} class="inventory-slot" type="button" on:click={() => selectInventoryItem(item)}><span class="slot-icon">{#if isImageIcon(getInventoryIcon(item)) }<img src={getInventoryIcon(item)} alt="" />{:else}{getInventoryIcon(item)}{/if}</span><span class="slot-count">{item.quantity}</span></button>{/each}</div>{#if selectedInventoryItem}<article class="inventory-detail"><div class="inventory-detail-icon">{#if isImageIcon(getInventoryIcon(selectedInventoryItem)) }<img src={getInventoryIcon(selectedInventoryItem)} alt="" />{:else}{getInventoryIcon(selectedInventoryItem)}{/if}</div><div><p class="eyebrow">ITEM DETAIL</p><h3>{selectedInventoryItem.item_name}</h3><p>{selectedInventoryItem.item_effect || '등록된 효과가 없습니다.'}</p><div><span class="tag">{selectedInventoryItem.grade}</span><span class="tag">{selectedInventoryItem.item_type}</span><span class="inventory-quantity">× {selectedInventoryItem.quantity}</span></div></div></article>{:else}<div class="inventory-detail empty"><span>아이템을 선택하세요</span></div>{/if}</div>{:else}<div class="repeat-empty">등록된 아이템이 없습니다.</div>{/if}</section>{/if}
+  {#if isMyPage && profileSection === 'inventory'}<section class="inventory-game-panel panel"><div class="section-head"><div><p class="eyebrow">INVENTORY SLOTS</p><h2>인벤토리</h2></div><span class="form-hint">아이콘을 클릭하면 상세 정보가 표시됩니다</span></div>{#if inventory.length}<div class="inventory-game-layout"><div class="inventory-slots">{#each inventory as item}<button class:active={selectedInventoryItem?.id === item.id} class="inventory-slot" type="button" on:click={() => selectInventoryItem(item)}><span class="slot-icon">{#if isImageIcon(getInventoryIcon(item)) }<img src={getInventoryIcon(item)} alt="" />{:else}{getInventoryIcon(item)}{/if}</span><span class="slot-count">{item.quantity}</span></button>{/each}</div>{#if selectedInventoryItem}<article class="inventory-detail"><div class="inventory-detail-icon">{#if isImageIcon(getInventoryIcon(selectedInventoryItem)) }<img src={getInventoryIcon(selectedInventoryItem)} alt="" />{:else}{getInventoryIcon(selectedInventoryItem)}{/if}</div><div><p class="eyebrow">ITEM DETAIL</p><h3>{selectedInventoryItem.item_name}</h3><div class="item-copy-block"><strong>[효과]</strong><p>{selectedInventoryItem.item_effect || '등록된 효과가 없습니다.'}</p></div><div class="item-copy-block"><strong>[설명]</strong><p>{selectedInventoryItem.item_description || '등록된 설명이 없습니다.'}</p></div><div><span class="tag">{selectedInventoryItem.grade}</span><span class="tag">{selectedInventoryItem.item_type}</span><span class="inventory-quantity">× {selectedInventoryItem.quantity}</span></div></div></article>{:else}<div class="inventory-detail empty"><span>아이템을 선택하세요</span></div>{/if}</div>{:else}<div class="repeat-empty">등록된 아이템이 없습니다.</div>{/if}</section>{/if}
   <footer class="footer"><div class="footer-brand"><span class="brand-mark">od</span><span>open door</span></div><span>장기 TRPG 캠페인을 위한 세계관 기록소</span><span>아이콘: Caro Asercion / game-icons.net</span><span>© 2026 OPEN DOOR</span></footer>
 </div>
 

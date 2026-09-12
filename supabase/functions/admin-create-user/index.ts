@@ -80,7 +80,8 @@ Deno.serve(async (request) => {
         role_traits: String(character.roleTraits || '').trim(),
         age: character.age ? Number(character.age) : null,
         height: character.height ? Number(character.height) : null,
-        weight: character.weight ? Number(character.weight) : null
+        weight: character.weight ? Number(character.weight) : null,
+        money: Number.isFinite(Number(character.money)) ? Math.min(Math.max(0, Math.floor(Number(character.money))), 2147483647) : 0
       });
       if (characterError) {
         await adminClient.auth.admin.deleteUser(userId);
